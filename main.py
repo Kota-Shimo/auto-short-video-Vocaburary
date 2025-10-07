@@ -1,16 +1,18 @@
 #!/usr/bin/env python
 """
-main.py – GPT で会話 → OpenAI TTS → 「lines.json & full.mp3」を作成し、
+main.py – GPTで台本（伸びる構成）→ OpenAI TTS → 「lines.json & full.mp3」生成 →
           chunk_builder.py で動画生成 → upload_youtube.py でアップロード。
-          combos.yaml の各エントリを順に処理して、複数動画をアップロードできる。
+          combos.yaml の各エントリを順に処理して、複数動画をアップロード。
 
-Shorts 最適化版:
-- 縦 1080x1920 向け
-- 60 秒以内に自動トリム
-- 冒頭に hook（seed_phrase）を置き、終盤はループ感を強調
+追加点:
+- CONTENT_MODE（dialogue/howto/listicle/wisdom/fact/qa）で“伸びる構成”に最適化
+- topic="AUTO" で当日トピックを自動選択（pick_by_content_type）
+- seed hook を強化（_make_seed_phrase）
+
+既存仕様は維持（roleplayの (spk, line) → lines.json 形式 / 複数字幕行 / chunk_builder連携）
 """
 
-import argparse, logging, re, json, subprocess
+import argparse, logging, re, json, subprocess, os
 from datetime import datetime
 from pathlib import Path
 from shutil import rmtree
@@ -20,16 +22,18 @@ from pydub import AudioSegment
 from openai import OpenAI
 
 from config         import BASE, OUTPUT, TEMP
-from dialogue       import make_dialogue
+from dialogue       import make_dialogue  # ← mode対応＆伸びる構成で生成（互換API）
 from translate      import translate
 from tts_openai     import speak
 from audio_fx       import enhance
 from bg_image       import fetch as fetch_bg
 from thumbnail      import make_thumbnail
 from upload_youtube import upload
+from topic_picker   import pick_by_content_type
 
 GPT = OpenAI()
-MAX_SHORTS_SEC = 59.0   # Shorts 判定のための上限（安全マージン）
+MAX_SHORTS_SEC   = 59.0
+CONTENT_MODE     = os.environ.get("CONTENT_MODE", "dialogue")  # dialogue/howto/listicle/wisdom/fact/qa
 
 # ───────────────────────────────────────────────
 # combos.yaml 読み込み
@@ -63,16 +67,25 @@ LANG_NAME = {
 }
 
 # ───────────────────────────────────────────────
-# ✅ HOOK 生成 (seed_phrase)
+# トピック取得: "AUTO"なら自動ピック、文字列ならそのまま
+# ───────────────────────────────────────────────
+def resolve_topic(arg_topic: str) -> str:
+    if arg_topic and arg_topic.strip().lower() == "auto":
+        # 先頭コンボの音声言語をヒントに、コンテンツ種別に応じて1本のベーストピックを選定
+        first_audio_lang = COMBOS[0]["audio"]
+        topic = pick_by_content_type(CONTENT_MODE, first_audio_lang)
+        logging.info(f"[AUTO TOPIC] {topic}")
+        return topic
+    return arg_topic
+
+# ───────────────────────────────────────────────
+# ✅ HOOK 生成 (seed_phrase) – 言語別に短く強い1行
 # ───────────────────────────────────────────────
 def _make_seed_phrase(topic: str, lang_code: str) -> str:
     lang = LANG_NAME.get(lang_code, "English")
     prompt = (
-        f"Write one short hook sentence in {lang} that immediately grabs attention "
-        f"for a language-learning roleplay about {topic}. "
-        "It should sound natural and motivating, ≤10 words, and make viewers curious.\n"
-        "Examples: 'Can you handle this hotel check-in?' / "
-        "'Let’s see how you’d order food in English!'"
+        f"Write ONE short hook in {lang} that grabs attention for a 30–45s short video about: {topic}. "
+        "Use a bold claim or a question. ≤10 words. No quotes."
     )
     try:
         rsp = GPT.chat.completions.create(
@@ -85,7 +98,7 @@ def _make_seed_phrase(topic: str, lang_code: str) -> str:
         return ""
 
 # ───────────────────────────────────────────────
-# YouTube タイトル・説明・タグ生成
+# YouTube タイトル・説明・タグ生成（既存ロジック維持）
 # ───────────────────────────────────────────────
 def make_title(topic, title_lang: str):
     if title_lang == "ja":
@@ -163,42 +176,47 @@ def _concat_trim_to(mp_paths, max_sec):
     return new_durs
 
 # ───────────────────────────────────────────────
-# 実行
+# 1コンボ処理
 # ───────────────────────────────────────────────
-def run_all(topic, turns, privacy, do_upload, chunk_size):
-    for combo in COMBOS:
-        audio_lang  = combo["audio"]
-        subs        = combo["subs"]
-        account     = combo.get("account","default")
-        title_lang  = combo.get("title_lang", subs[1] if len(subs)>1 else audio_lang)
-        logging.info(f"=== Combo: {audio_lang}, subs={subs}, account={account}, title_lang={title_lang} ===")
-        run_one(topic, turns, audio_lang, subs, title_lang, privacy, account, do_upload, chunk_size)
-
 def run_one(topic, turns, audio_lang, subs, title_lang, yt_privacy, account, do_upload, chunk_size):
     reset_temp()
 
+    # トピック（日本語→各言語に翻訳してから生成すると、各言語の自然さが増す）
     topic_for_dialogue = translate(topic, audio_lang) if audio_lang != "ja" else topic
-    seed_phrase = _make_seed_phrase(topic_for_dialogue, audio_lang)
-    dialogue = make_dialogue(topic_for_dialogue, audio_lang, turns, seed_phrase=seed_phrase)
 
+    # 強めのhookを先に作って台本に渡す
+    seed_phrase = _make_seed_phrase(topic_for_dialogue, audio_lang)
+
+    # 伸びる構成の台本を roleplay 形式で取得（互換: List[(spk, line)])
+    dialogue = make_dialogue(
+        topic_for_dialogue, audio_lang, turns,
+        seed_phrase=seed_phrase, mode=CONTENT_MODE
+    )
+
+    # 音声＆字幕
     mp_parts, sub_rows = [], [[] for _ in subs]
     for i, (spk, line) in enumerate(dialogue, 1):
-        if not line.strip(): continue
+        if not line.strip(): 
+            continue
         mp = TEMP / f"{i:02d}.mp3"
-        speak(audio_lang, spk, line, mp)
+        speak(audio_lang, spk, line, mp)  # 既存TTS
         mp_parts.append(mp)
         for r, lang in enumerate(subs):
             sub_rows[r].append(line if lang==audio_lang else translate(line, lang))
 
+    # 結合・整音
     new_durs = _concat_trim_to(mp_parts, MAX_SHORTS_SEC)
     enhance(TEMP/"full_raw.mp3", TEMP/"full.mp3")
 
+    # 背景
     bg_png = TEMP / "bg.png"
     fetch_bg(topic, bg_png)
 
+    # 台本行数とオーディオ尺の整合
     valid_dialogue = [d for d in dialogue if d[1].strip()]
     valid_dialogue = valid_dialogue[:len(new_durs)]
 
+    # lines.json 生成（[spk, sub1, sub2, ..., dur]）
     lines_data = []
     for i, ((spk, txt), dur) in enumerate(zip(valid_dialogue, new_durs)):
         row = [spk]
@@ -206,15 +224,17 @@ def run_one(topic, turns, audio_lang, subs, title_lang, yt_privacy, account, do_
             row.append(sub_rows[r][i])
         row.append(dur)
         lines_data.append(row)
-
     (TEMP/"lines.json").write_text(json.dumps(lines_data, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    if args.lines_only: return
+    if args.lines_only:
+        return
 
+    # サムネ
     thumb = TEMP / "thumbnail.jpg"
     thumb_lang = subs[1] if len(subs) > 1 else audio_lang
     make_thumbnail(topic, thumb_lang, thumb)
 
+    # 動画生成
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     final_mp4 = OUTPUT / f"{audio_lang}-{'_'.join(subs)}_{stamp}.mp4"
     final_mp4.parent.mkdir(parents=True, exist_ok=True)
@@ -229,8 +249,10 @@ def run_one(topic, turns, audio_lang, subs, title_lang, yt_privacy, account, do_
     logging.info("🔹 chunk_builder cmd: %s", " ".join(cmd))
     subprocess.run(cmd, check=True)
 
-    if not do_upload: return
+    if not do_upload:
+        return
 
+    # メタ生成＆アップロード
     title = make_title(topic, title_lang)
     desc  = make_desc(topic, title_lang)
     tags  = make_tags(topic, audio_lang, subs, title_lang)
@@ -239,14 +261,26 @@ def run_one(topic, turns, audio_lang, subs, title_lang, yt_privacy, account, do_
            privacy=yt_privacy, account=account, thumbnail=thumb, default_lang=audio_lang)
 
 # ───────────────────────────────────────────────
+def run_all(topic, turns, privacy, do_upload, chunk_size):
+    for combo in COMBOS:
+        audio_lang  = combo["audio"]
+        subs        = combo["subs"]
+        account     = combo.get("account","default")
+        title_lang  = combo.get("title_lang", subs[1] if len(subs)>1 else audio_lang)
+        logging.info(f"=== Combo: {audio_lang}, subs={subs}, account={account}, title_lang={title_lang}, mode={CONTENT_MODE} ===")
+        run_one(topic, turns, audio_lang, subs, title_lang, privacy, account, do_upload, chunk_size)
+
+# ───────────────────────────────────────────────
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     ap = argparse.ArgumentParser()
-    ap.add_argument("topic", help="会話テーマ")
+    ap.add_argument("topic", help='会話テーマ。自動選択する場合は "AUTO" を指定')
     ap.add_argument("--turns", type=int, default=8)
     ap.add_argument("--privacy", default="unlisted", choices=["public","unlisted","private"])
     ap.add_argument("--lines-only", action="store_true")
     ap.add_argument("--no-upload", action="store_true")
     ap.add_argument("--chunk", type=int, default=9999, help="Shortsは分割せず1本推奨")
     args = ap.parse_args()
-    run_all(args.topic, args.turns, args.privacy, not args.no_upload, args.chunk)
+
+    topic = resolve_topic(args.topic)
+    run_all(topic, args.turns, args.privacy, not args.no_upload, args.chunk)
