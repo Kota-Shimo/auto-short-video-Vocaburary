@@ -1,4 +1,4 @@
-"""OpenAI TTS wrapper – language-aware & two-speaker support."""
+"""OpenAI TTS wrapper – language-aware & two-speaker support with simple style control."""
 
 import re
 from pathlib import Path
@@ -30,28 +30,72 @@ def _clean_for_tts(text: str, lang: str) -> str:
     return t or "。"
 
 
-def speak(lang: str, speaker: str, text: str, out_path: Path):
+def _apply_style(text: str, lang: str, style: str) -> str:
+    """
+    テキスト整形だけで抑揚を“誘導”する軽量スタイル。
+    - energetic: 句点→感嘆、語尾を軽く上げる
+    - calm     : 句点増で落ち着き、語尾を柔らかく
+    - serious  : 断定調・短文寄せ
+    - neutral  : 変更なし
+    ※ TTSモデルのパラメータを直接いじらないため、下位互換で安全。
+    """
+    s = text.strip()
+    st = (style or "neutral").lower()
+
+    if st == "energetic":
+        if lang == "ja":
+            s = s.replace("。", "！")
+            if not s.endswith(("！", "？")):
+                s += "！"
+        else:
+            if not s.endswith(("!", "?")):
+                s += "!"
+    elif st == "calm":
+        if lang == "ja":
+            s = s.replace("！", "。").replace("!", "。")
+            if not s.endswith("。"):
+                s += "。"
+        else:
+            s = s.replace("!", ".")
+            if not s.endswith("."):
+                s += "."
+    elif st == "serious":
+        if lang == "ja":
+            # 余分な装飾を抑え、句点で締める
+            s = re.sub(r"[！!？?]+$", "", s)
+            if not s.endswith("。"):
+                s += "。"
+        else:
+            s = re.sub(r"[!?.]+$", ".", s)
+            if not s.endswith("."):
+                s += "."
+    # neutral は変更なし
+    return s
+
+
+def speak(lang: str, speaker: str, text: str, out_path: Path, style: str = "neutral"):
     """
     lang     : 'en', 'ja', 'pt', 'id' など
     speaker  : 'Alice' / 'Bob' / 'N'（N=ナレーション）
     text     : セリフ
     out_path : 書き出し先 .mp3
+    style    : 'neutral' | 'energetic' | 'calm' | 'serious'（任意）
     """
+    # 1) 事前整形
     clean_text = _clean_for_tts(text, lang)
+    styled_text = _apply_style(clean_text, lang, style)
 
+    # 2) ボイス選択（N=Alice流用）
     v_a, v_b = VOICE_MAP.get(lang, FALLBACK_VOICES)
     spk = (speaker or "").lower()
-
-    # ✅ N を既存ボイスに割り当て（ここだけが今回の追加）
-    # N を Alice と同じボイスにしたい場合：
     voice_id = v_a if spk in ("alice", "n") else v_b
-
-    # ※ Bob に合わせたい場合は ↓ のようにする
+    # ※ Bob に合わせたい場合は以下に変更：
     # voice_id = v_b if spk in ("bob", "n") else v_a
 
+    # 3) 合成
     resp = client.audio.speech.create(
         model="tts-1",          # 高音質は "tts-1-hd"
         voice=voice_id,
-        input=clean_text,
+        input=styled_text,
     )
     out_path.write_bytes(resp.content)
