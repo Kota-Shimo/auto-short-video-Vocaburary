@@ -2,22 +2,24 @@
 """
 Pick TODAY’s podcast/video topic.
 
-- まず GPT-4o に “自然な日本語の会話シーン名” を 1 行だけリクエスト
-- 応答が旧形式（「<大テーマ> - <具体シーン>」や「英語/英会話」を含む）でも
-  自動的に “ホテルでのチェックイン会話” のような自然表現へ正規化
-- API 呼び出しが失敗したら SEED_TOPICS からランダムでフォールバック
+- GPT-4o に “自然な日本語の会話シーン名 or 汎用ショート向けトピック” を 1 行だけリクエスト
+- 旧形式（「<大テーマ> - <具体シーン>」や「◯◯英語/英会話」）でも
+  自動的に “ホテルでのチェックイン会話” のような自然表現へ正規化（dialogue時）
+- API 失敗時は SEED_TOPICS からフォールバック
+- 生成は常に「日本語」→ main.py 側で各音声言語に翻訳（多言語コンボとの整合を保つ）
 """
 
+import os
+import re
 import random
 import datetime
-import os
-import openai
-import re
+from typing import List
+from openai import OpenAI
 
-openai.api_key = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ── フォールバック用プリセット（最初から自然な日本語） ───────────────
-SEED_TOPICS: list[str] = [
+SEED_TOPICS: List[str] = [
     "ホテルでのチェックイン会話",
     "ホテルでの朝食案内",
     "ホテルでの部屋設備の説明",
@@ -35,7 +37,7 @@ SEED_TOPICS: list[str] = [
 ]
 
 # ────────────────────────────────────────
-# 正規化ユーティリティ
+# 正規化ユーティリティ（dialogue 用）
 # ────────────────────────────────────────
 
 # 大テーマの置換表（「◯◯英語/英会話」→「◯◯での」等）
@@ -58,7 +60,7 @@ NO_SUFFIX_KEYWORDS = [
 
 def _clean_line(raw: str) -> str:
     """先頭行を取り、両端の引用符や記号を除去"""
-    first = raw.strip().splitlines()[0]
+    first = (raw or "").strip().splitlines()[0] if raw else ""
     t = re.sub(r'^[\s"“”\'\-•・]+', "", first)
     t = re.sub(r'[\s"“”\']+$', "", t)
     t = re.sub(r'\s+', " ", t).strip()
@@ -86,17 +88,13 @@ def _normalize_hyphen_form(s: str) -> str:
     theme = re.sub(r'(での)+', 'での', theme)
     theme = re.sub(r'(のの)+', 'の', theme)
 
-    if _needs_suffix(scene):
-        scene_out = f"{scene}の会話"
-    else:
-        scene_out = scene
-
+    scene_out = f"{scene}の会話" if _needs_suffix(scene) else scene
     topic = f"{theme} {scene_out}"
     return re.sub(r'\s+', " ", topic).strip()
 
 def _normalize(topic: str) -> str:
-    """自然な会話トピックに正規化"""
-    t = topic
+    """自然な会話トピックに正規化（dialogue 限定）"""
+    t = topic or ""
     if " - " in t or "-" in t:
         t = _normalize_hyphen_form(t)
     for k, v in THEME_MAP.items():
@@ -114,18 +112,18 @@ def _normalize(topic: str) -> str:
 
 # ────────────────────────────────────────
 def pick() -> str:
-    """自然な日本語の会話シーントピックを返す。"""
+    """自然な日本語の会話シーントピックを 1 行返す（dialogue 相当）。"""
     today = datetime.date.today().isoformat()
     prompt = (
         f"Today is {today}. "
         "日本語で、語学学習向けの“自然な会話シーン名”を1つだけ提案してください。"
         "例:『ホテルでのチェックイン会話』『空港での保安検査のやりとり』『レストランでの注文会話』。"
-        "15〜20文字程度を目安。句読点や引用符は不要。"
+        "15〜20文字程度。句読点や引用符は不要。"
         "返答はそのフレーズ1行のみ。"
     )
 
     try:
-        rsp = openai.chat.completions.create(
+        rsp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
@@ -140,30 +138,36 @@ def pick() -> str:
         return random.choice(SEED_TOPICS)
 
 # ────────────────────────────────────────
-# ✅ 追加: コンテンツタイプ別トピック生成
+# ✅ コンテンツタイプ別トピック生成（国/言語に依存しないガイド）
 # ────────────────────────────────────────
+GUIDE = {
+    # 誰でも遭遇するシーン名の提案（最終的に main.py 側で各言語へ翻訳して使う）
+    "dialogue": "誰でも遭遇する生活/仕事シーン名（例: チェックイン会話、注文会話、道を尋ねるやりとり）。",
+    # HowTo：30秒で実践できる、行動に移しやすい汎用コツ
+    "howto":    "30秒で実践できるコツ（例: 伝わりやすく話す3ステップ、集中力を上げるコツ3つ）。",
+    # Listicle：3点構成で学べる普遍的話題
+    "listicle": "3ポイントで学べるテーマ（例: 相手の心を掴むコツ3つ、印象が良くなる言い回し3選）。",
+    # Wisdom：短い知恵/名言（学習/継続/行動に結びつくもの）
+    "wisdom":   "短い知恵・名言（例: 先延ばしを防ぐ一言、続けるための小さな仕組み）。",
+    # Fact：文化・コミュニケーションの豆知識（特定の国に固定しない）
+    "fact":     "文化やコミュニケーションの豆知識（例: 相づちの違い、言葉の由来など）。",
+    # QA：誤解されやすい表現や言い換え（NG→OK→Pro など）
+    "qa":       "誤解されやすいQ&A（例: NG→OK→Proの言い換え、あるあるの勘違い）。",
+}
+
 def pick_by_content_type(content_type: str, audio_lang: str) -> str:
     """
     コンテンツ種別に応じて、誰でも刺さる“伸びる”ショート動画トピックを1行返す。
-    dialogue のときは既存の正規化ロジックを活かして自然な会話シーンに整える。
+    - 生成は常に日本語（後段で各音声言語に翻訳するため）
+    - dialogue のときのみ会話シーン名として正規化
     """
-    import datetime, random, re, os
-    from openai import OpenAI
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
     today = datetime.date.today().isoformat()
-    GUIDE = {
-        "dialogue": "誰でも遭遇する生活/仕事シーン名（例: ホテルでのチェックイン会話、レストランでの注文会話など）。",
-        "howto": "30秒で実践できるハウツー（例: 英語が自然に聞こえる3ステップ、集中力を上げるコツ3つ）。",
-        "listicle": "3ポイントで話せるテーマ（例: モチベーションが上がる習慣3つ、印象が良くなるフレーズ3選）。",
-        "wisdom": "短い知恵・名言（例: 先延ばしを防ぐ一言、小さく始める力）。",
-        "fact": "豆知識・雑学（例: 海外で驚かれる日本の文化、言葉の由来など）。",
-        "qa": "誤解されやすいQ&A（例: 発音のNG→OK→Proパターン、英会話の間違いあるある）。",
-    }
+    ct = (content_type or "dialogue").lower()
+    guide = GUIDE.get(ct, GUIDE["dialogue"])
 
     prompt = (
         f"Today is {today}. "
-        f"日本語で、{GUIDE.get(content_type, GUIDE['dialogue'])} "
+        f"日本語で、{guide} "
         "句読点や引用符なしで自然な1行だけ返してください。"
     )
 
@@ -175,7 +179,7 @@ def pick_by_content_type(content_type: str, audio_lang: str) -> str:
             timeout=20,
         )
         raw = _clean_line(rsp.choices[0].message.content)
-        if content_type == "dialogue":
+        if ct == "dialogue":
             raw = _normalize(raw)
         if not raw or re.search(r"[A-Za-z]", raw):
             return random.choice(SEED_TOPICS)
