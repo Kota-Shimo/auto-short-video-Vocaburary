@@ -70,11 +70,11 @@ jobs:
         shell: bash
         run: |
           topic=$(python - <<'PY'
-from topic_picker import pick_by_content_type
-import os
-print(pick_by_content_type(os.environ.get("MODE","wisdom"), "ja"))
-PY
-)
+          from topic_picker import pick_by_content_type
+          import os
+          print(pick_by_content_type(os.environ.get("MODE","wisdom"), "ja"))
+          PY
+          )
           echo "topic=$topic" | tee -a "$GITHUB_OUTPUT"
 
       - name: 🎬 Build & Upload All Combos
