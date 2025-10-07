@@ -72,26 +72,20 @@ def _normalize_hyphen_form(s: str) -> str:
     「<大テーマ>(英語|英会話)? - <具体シーン>」→「<場所/文脈> <具体シーン>(の会話)」
     例: "ホテル英語 - チェックイン" → "ホテルでの チェックイン会話"
     """
-    # 例: 「ホテル英語 - チェックイン」「空港英会話-保安検査」などに対応
     m = re.match(r'^\s*(.+?)\s*(?:英語|英会話)?\s*-\s*(.+?)\s*$', s)
     if not m:
         return s  # ハイフン形式でない → そのまま
 
     theme, scene = m.group(1), m.group(2)
-    # テーマ正規化
     for k, v in THEME_MAP.items():
         if k in theme:
             theme = theme.replace(k, v)
             break
-    # テーマに「での/中の/の」で終わらない場合の軽い保険
     if not re.search(r'(での|中の|の)$', theme):
         theme = theme + "での"
-
-    # 余計な助詞連続を軽く整形（例: 「でのでの」など）
     theme = re.sub(r'(での)+', 'での', theme)
     theme = re.sub(r'(のの)+', 'の', theme)
 
-    # 「の会話」をつけるか判断
     if _needs_suffix(scene):
         scene_out = f"{scene}の会話"
     else:
@@ -101,35 +95,20 @@ def _normalize_hyphen_form(s: str) -> str:
     return re.sub(r'\s+', " ", topic).strip()
 
 def _normalize(topic: str) -> str:
-    """
-    1) ハイフン形式なら自然表現へ変換
-    2) 「英語/英会話」を含む旧表現をテーマ変換
-    3) 冗長な空白や記号を整理
-    """
+    """自然な会話トピックに正規化"""
     t = topic
-
-    # 1) ハイフン形式を優先的に正規化
     if " - " in t or "-" in t:
         t = _normalize_hyphen_form(t)
-
-    # 2) テーマ単体が残っているケースへも対応
     for k, v in THEME_MAP.items():
         t = t.replace(k, v)
-
-    # 3) 末尾が不自然なら簡易補正（例: 「ホテルでのチェックイン」→「ホテルでのチェックイン会話」）
     if re.search(r'(での|中の|の)\s*$', t):
         t = t.rstrip(" の")
-    # シーンが短い名詞のみで終わる場合、自然に会話へ落とす
     if not any(k in t for k in NO_SUFFIX_KEYWORDS):
-        # 「〜での ◯◯」の形なら「〜での ◯◯会話」へ
         m2 = re.match(r'^(.*での)\s+(.+)$', t)
         if m2:
             prefix, scene = m2.group(1), m2.group(2)
-            # 既に十分自然なら維持（例: 機内でのやりとり）
             if _needs_suffix(scene):
                 t = f"{prefix} {scene}の会話"
-
-    # 仕上げの整形
     t = re.sub(r'\s+', " ", t).strip()
     return t
 
@@ -137,7 +116,6 @@ def _normalize(topic: str) -> str:
 def pick() -> str:
     """自然な日本語の会話シーントピックを返す。"""
     today = datetime.date.today().isoformat()
-
     prompt = (
         f"Today is {today}. "
         "日本語で、語学学習向けの“自然な会話シーン名”を1つだけ提案してください。"
@@ -155,14 +133,56 @@ def pick() -> str:
         )
         raw = _clean_line(rsp.choices[0].message.content)
         topic = _normalize(raw)
-        # 文字化けや英語混入の簡易ガード
         if not topic or re.search(r'[A-Za-z]', topic):
             return random.choice(SEED_TOPICS)
         return topic
-
     except Exception:
         return random.choice(SEED_TOPICS)
 
+# ────────────────────────────────────────
+# ✅ 追加: コンテンツタイプ別トピック生成
+# ────────────────────────────────────────
+def pick_by_content_type(content_type: str, audio_lang: str) -> str:
+    """
+    コンテンツ種別に応じて、誰でも刺さる“伸びる”ショート動画トピックを1行返す。
+    dialogue のときは既存の正規化ロジックを活かして自然な会話シーンに整える。
+    """
+    import datetime, random, re, os
+    from openai import OpenAI
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+    today = datetime.date.today().isoformat()
+    GUIDE = {
+        "dialogue": "誰でも遭遇する生活/仕事シーン名（例: ホテルでのチェックイン会話、レストランでの注文会話など）。",
+        "howto": "30秒で実践できるハウツー（例: 英語が自然に聞こえる3ステップ、集中力を上げるコツ3つ）。",
+        "listicle": "3ポイントで話せるテーマ（例: モチベーションが上がる習慣3つ、印象が良くなるフレーズ3選）。",
+        "wisdom": "短い知恵・名言（例: 先延ばしを防ぐ一言、小さく始める力）。",
+        "fact": "豆知識・雑学（例: 海外で驚かれる日本の文化、言葉の由来など）。",
+        "qa": "誤解されやすいQ&A（例: 発音のNG→OK→Proパターン、英会話の間違いあるある）。",
+    }
+
+    prompt = (
+        f"Today is {today}. "
+        f"日本語で、{GUIDE.get(content_type, GUIDE['dialogue'])} "
+        "句読点や引用符なしで自然な1行だけ返してください。"
+    )
+
+    try:
+        rsp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.8,
+            timeout=20,
+        )
+        raw = _clean_line(rsp.choices[0].message.content)
+        if content_type == "dialogue":
+            raw = _normalize(raw)
+        if not raw or re.search(r"[A-Za-z]", raw):
+            return random.choice(SEED_TOPICS)
+        return raw
+    except Exception:
+        return random.choice(SEED_TOPICS)
+
+# ────────────────────────────────────────
 if __name__ == "__main__":
     print(pick())
