@@ -28,6 +28,11 @@ ap.add_argument("--chunk",     type=int, default=40, help="1 チャンクあた�
 ap.add_argument("--rows",      type=int, default=2,  help="字幕段数 (上段=音声言語, 下段=翻訳など)")
 ap.add_argument("--fsize-top", type=int, default=None, help="上段字幕フォントサイズ")
 ap.add_argument("--fsize-bot", type=int, default=None, help="下段字幕フォントサイズ")
+# 追加: モノローグ(N)のラベル表示/配置オプション
+ap.add_argument("--show-n-label", action="store_true",
+                help="N(ナレーション)のラベルを表示したい場合に指定（デフォルトは非表示）")
+ap.add_argument("--center-n", action="store_true",
+                help="N(ナレーション)の字幕を中央寄せにする（推奨）")
 args = ap.parse_args()
 
 SCRIPT     = Path(args.lines_json)
@@ -61,6 +66,11 @@ for d in durations:
     cumulative.append(cumulative[-1] + d)  # 累積
 
 part_files = []
+
+# ここで N 表示制御用のフラグをまとめる（subtitle_video へ渡す）
+hide_n_label = not args.show_n_label
+monologue_center = bool(args.center_n)
+
 for idx, chunk in enumerate(parts):
     # start〜end の秒数を計算
     t_start = cumulative[idx * LINES_PER]
@@ -83,12 +93,16 @@ for idx, chunk in enumerate(parts):
     print(f"▶️ part {idx+1}/{len(parts)} | 行数={len(chunk)}"
           f" | start={t_start:.1f}s len={t_len:.1f}s")
 
-    # フォントサイズを可変にしたい場合: argparse で受け取ってオプション連想配列にまとめる
+    # フォントサイズなど可変指定をまとめる
     extra_args = {}
     if args.fsize_top:
         extra_args["fsize_top"] = args.fsize_top
     if args.fsize_bot:
         extra_args["fsize_bot"] = args.fsize_bot
+
+    # 追加: N の表示制御オプションを渡す
+    extra_args["hide_n_label"] = hide_n_label
+    extra_args["monologue_center"] = monologue_center
 
     # 字幕つき動画を生成
     build_video(
@@ -97,7 +111,7 @@ for idx, chunk in enumerate(parts):
         voice_mp3=audio_part,
         out_mp4=mp4_part,
         rows=ROWS,
-        **extra_args  # fsize_top, fsize_bot を渡す
+        **extra_args  # fsize_top, fsize_bot, hide_n_label, monologue_center
     )
 
     part_files.append(mp4_part)
