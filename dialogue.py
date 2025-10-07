@@ -2,7 +2,7 @@
 """Generate short scripts via GPT-4o.
 - Backward compatible: returns List[(speaker, text)] with 'Alice'/'Bob' alternating in dialogue modes.
 - Monologue-first in specific modes (wisdom, fact), using speaker 'N' (Narrator).
-- Enforces growth structure: Hook → 3 beats → Closing, short lines, no code-switching.
+- Growth structure: Hook → 3 beats → Closing. Short lines. Strictly monolingual & neutral (no language/country mentions).
 """
 
 from typing import List, Tuple
@@ -13,7 +13,7 @@ from config import OPENAI_API_KEY
 openai = OpenAI(api_key=OPENAI_API_KEY)
 
 # ─────────────────────────────────────────
-# モード定義
+# モード定義（中立的ガイド）
 # ─────────────────────────────────────────
 MODE_GUIDE = {
     "dialogue": "Real-life roleplay. Hook(0-2s) -> Turn1 -> Turn2 -> Turn3 -> Closing(<=8s left). Keep universal.",
@@ -24,23 +24,27 @@ MODE_GUIDE = {
     "qa":       "NG/OK/Pro. Hook -> NG -> OK -> Pro -> Closing.",
 }
 
-# ここで「ナレーション中心」にしたいモードを指定
+# ナレーション中心にしたいモード
 MONOLOGUE_MODES = {"wisdom", "fact"}
 
+# ─────────────────────────────────────────
+# 言語・国名を出さない前提で、厳密モノリンガル化
+# ─────────────────────────────────────────
 def _lang_rules(lang: str) -> str:
-    """Language-specific constraints to avoid code-switching."""
-    if lang == "ja":
-        return (
-            "This is a Japanese listening script. "
-            "Use pure Japanese only. "
-            "Do NOT include any English words, romaji (Latin letters), or code-switching. "
-            "Ignore any implication that English should appear even if the topic contains '英語'. "
-            "Natural Japanese only."
-        )
-    return f"Stay entirely in {lang}. Avoid mixing other languages."
+    """
+    出力言語を厳密に単一化し、他言語/他文字体系や翻訳注釈を禁止。
+    ここでは特定の言語名・国名は指示に含めない（出力も中立化のため）。
+    """
+    return (
+        f"This script must be written entirely in {lang}. "
+        "Do NOT code-switch. Do NOT include other languages or writing systems. "
+        "No translations, no glosses, no brackets for meanings."
+    )
 
+# ─────────────────────────────────────────
+# TTS 安定のための軽い整形（JAのみ特別処理）
+# ─────────────────────────────────────────
 def _sanitize_line(lang: str, text: str) -> str:
-    """TTSが詰まりやすい要素を軽減。"""
     txt = text.strip()
     if lang == "ja":
         txt = re.sub(r"[A-Za-z]+", "", txt)           # ローマ字/英単語除去（数字は保持）
@@ -54,6 +58,9 @@ def _sanitize_line(lang: str, text: str) -> str:
 def _fallback_line(lang: str) -> str:
     return "はい。" if lang == "ja" else "Okay."
 
+# ─────────────────────────────────────────
+# 本体
+# ─────────────────────────────────────────
 def make_dialogue(
     topic: str,
     lang: str,
@@ -66,21 +73,67 @@ def make_dialogue(
     - dialogue/howto/listicle/qa → Alice/Bob 交互の会話中心
     - wisdom/fact → N（Narrator）中心のモノローグ（必要に応じて A/B を少しだけ使う可）
     - Hook → 3ビート → Closing（ループ感）を強制
+    - 出力は中立：特定の言語名・国名・学習者呼称を出さない
     """
     is_monologue = mode in MONOLOGUE_MODES
 
+    # 表示は中立、ただし日本語話者向けの括弧体裁だけ維持（出力に言語名は出ない）
     topic_hint = f"「{topic}」" if lang == "ja" else topic
     lang_rules = _lang_rules(lang)
     mode_guide = MODE_GUIDE.get(mode, MODE_GUIDE["dialogue"])
 
+    # 行長ヒント（言語名を挙げず、文字体系ベースで指示）
+    length_hint = (
+        "For alphabetic scripts: <= 12 words per line. "
+        "For CJK or similar: keep lines concise (~<=20 characters)."
+    )
+
+    # モード別の最小追加ルール（言語名・国名・“学習者”呼称を避ける）
+    extra_rule = ""
+    if mode == "dialogue":
+        extra_rule = (
+            "Include exactly one short learning tip *within* the dialogue "
+            "(e.g., a softer request, a natural confirmation, or a polite nuance), "
+            "without mentioning any language names, countries, or learners."
+        )
+    elif mode == "fact":
+        extra_rule = (
+            "Include one short, surprising point about communication or cultural nuance, "
+            "and add one concise example expression that fits the scene. "
+            "Do not mention any language names or countries."
+        )
+    elif mode == "howto":
+        extra_rule = (
+            "Structure as: a quick reason (Why) → 2 short steps (How) → a simple nudge (Try). "
+            "Keep it universal; avoid referring to any specific language or country."
+        )
+    elif mode == "listicle":
+        extra_rule = (
+            "Present three parallel points with a clear rhythm "
+            "(e.g., 'First / Then / Finally' or their natural equivalents), "
+            "with no mention of language names or countries."
+        )
+    elif mode == "wisdom":
+        extra_rule = (
+            "Keep it reflective and encouraging: one key idea, a tiny example, and a gentle takeaway. "
+            "Stay universal; do not mention language names or countries."
+        )
+    elif mode == "qa":
+        extra_rule = (
+            "Use an NG → OK → Pro pattern with very short, natural lines. "
+            "Keep it neutral; no language names or countries."
+        )
+
     if is_monologue:
         # ── モノローグ優先プロンプト ───────────────────────────────
         user = f"""
-You are a native-level {lang.upper()} narration writer.
+You are a native-level narration writer.
 
 Write a short, natural monologue in {lang} by a narrator 'N'.
 Topic: {topic_hint}
 Tone ref (seed): "{seed_phrase}" (style hint only; do not repeat literally)
+Mode: {mode} ({mode_guide})
+{extra_rule}
 
 STRUCTURE:
 - Line1 (Hook, 0–2s): bold claim or question to pull attention
@@ -92,19 +145,21 @@ Rules:
 1) Produce exactly {turns} lines (all spoken by 'N'), concise one sentence each.
 2) Prefix each line with 'N:'.
 3) {lang_rules}
-4) EN: <=12 words/line. JA: keep concise (~<=20 mora).
-5) Avoid lists, stage directions, emojis.
-6) Output ONLY the lines (no explanations).
-"""
+4) {length_hint}
+5) Do not mention any language names, nationalities, or countries.
+6) Avoid lists, stage directions, emojis.
+7) Output ONLY the lines (no explanations).
+""".strip()
     else:
         # ── 会話優先プロンプト（Alice/Bob 交互） ─────────────────────
         user = f"""
-You are a native-level {lang.upper()} dialogue writer.
+You are a native-level dialogue writer.
 
 Write a short, natural 2-person conversation in {lang} between Alice and Bob.
 Scene topic: {topic_hint}
 Tone ref (seed): "{seed_phrase}" (style hint only; do not repeat literally)
 Mode: {mode} ({mode_guide})
+{extra_rule}
 
 STRUCTURE (map to alternating lines):
 - Line1 (Hook, 0–2s): bold claim or question
@@ -116,10 +171,11 @@ Rules:
 1) Alternate strictly: Alice:, Bob:, Alice:, Bob: ... until exactly {turns * 2} lines.
 2) Each line = one short sentence; no lists, no stage directions, no emojis.
 3) {lang_rules}
-4) EN: <=12 words/line. JA: keep concise (~<=20 mora).
-5) Avoid repetitive endings; vary rhythm every ~8 seconds.
-6) Output ONLY the dialogue lines. No explanations.
-"""
+4) {length_hint}
+5) Do not mention any language names, nationalities, or countries.
+6) Avoid repetitive endings; vary rhythm every ~8 seconds.
+7) Output ONLY the dialogue lines. No explanations.
+""".strip()
 
     rsp = openai.chat.completions.create(
         model="gpt-4o-mini",
@@ -128,7 +184,8 @@ Rules:
         timeout=45,
     )
 
-    raw_lines = (rsp.choices[0].message.content or "").strip().splitlines()
+    raw = rsp.choices[0].message.content or ""
+    raw_lines = raw.strip().splitlines()
     result: List[Tuple[str, str]] = []
 
     if is_monologue:
