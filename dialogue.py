@@ -1,22 +1,21 @@
 # dialogue.py
-"""Generate a two-person roleplay script via GPT-4o with a growth-oriented structure.
-   - Backward compatible: returns List[(speaker, text)] with 'Alice'/'Bob' alternating.
-   - Adds `mode` to control patterns: dialogue/howto/listicle/wisdom/fact/qa
-   - Enforces hook → 3 beats → closing, short lines, no code-switching.
+"""Generate short scripts via GPT-4o.
+- Backward compatible: returns List[(speaker, text)] with 'Alice'/'Bob' alternating in dialogue modes.
+- Monologue-first in specific modes (wisdom, fact), using speaker 'N' (Narrator).
+- Enforces growth structure: Hook → 3 beats → Closing, short lines, no code-switching.
 """
 
 from typing import List, Tuple
 import re
-import os
 from openai import OpenAI
 from config import OPENAI_API_KEY
 
 openai = OpenAI(api_key=OPENAI_API_KEY)
 
 # ─────────────────────────────────────────
-# Mode guides (内部で“伸びる構成”を強制)
+# モード定義
 # ─────────────────────────────────────────
-_MODE_GUIDE = {
+MODE_GUIDE = {
     "dialogue": "Real-life roleplay. Hook(0-2s) -> Turn1 -> Turn2 -> Turn3 -> Closing(<=8s left). Keep universal.",
     "howto":    "Actionable 3 steps. Hook -> Step1 -> Step2 -> Step3 -> Closing.",
     "listicle": "3 points. Hook -> Point1 -> Point2 -> Point3 -> Closing.",
@@ -25,10 +24,12 @@ _MODE_GUIDE = {
     "qa":       "NG/OK/Pro. Hook -> NG -> OK -> Pro -> Closing.",
 }
 
+# ここで「ナレーション中心」にしたいモードを指定
+MONOLOGUE_MODES = {"wisdom", "fact"}
+
 def _lang_rules(lang: str) -> str:
     """Language-specific constraints to avoid code-switching."""
     if lang == "ja":
-        # 日本語台本の英語・ローマ字混入を強く禁止
         return (
             "This is a Japanese listening script. "
             "Use pure Japanese only. "
@@ -61,56 +62,93 @@ def make_dialogue(
     mode: str = "dialogue",
 ) -> List[Tuple[str, str]]:
     """
-    Returns: List[(speaker, text)] with strict alternation 'Alice'/'Bob'.
-    - first line acts as Hook, last line as Closing（軽くループ感）
-    - 中間は 3ビート（数字/具体例/言い換えで変化を付ける）
-    - `mode` によって内容の型を変えるが、出力フォーマットは常に同じ
+    Returns: List[(speaker, text)]
+    - dialogue/howto/listicle/qa → Alice/Bob 交互の会話中心
+    - wisdom/fact → N（Narrator）中心のモノローグ（必要に応じて A/B を少しだけ使う可）
+    - Hook → 3ビート → Closing（ループ感）を強制
     """
+    is_monologue = mode in MONOLOGUE_MODES
+
     topic_hint = f"「{topic}」" if lang == "ja" else topic
     lang_rules = _lang_rules(lang)
-    mode_guide = _MODE_GUIDE.get(mode, _MODE_GUIDE["dialogue"])
+    mode_guide = MODE_GUIDE.get(mode, MODE_GUIDE["dialogue"])
 
-    # GPT へのプロンプト（“伸びる構成”を交互会話にマッピング）
-    # 1行は短く：EN<=12 words / JAは~20モーラ目安
-    user = f"""
+    if is_monologue:
+        # ── モノローグ優先プロンプト ───────────────────────────────
+        user = f"""
+You are a native-level {lang.upper()} narration writer.
+
+Write a short, natural monologue in {lang} by a narrator 'N'.
+Topic: {topic_hint}
+Tone ref (seed): "{seed_phrase}" (style hint only; do not repeat literally)
+
+STRUCTURE:
+- Line1 (Hook, 0–2s): bold claim or question to pull attention
+- Lines2–4 (Beats 1–2): add pattern change (numbers, contrast, concrete example)
+- Lines5–6 (Beat 3): one visual tip/example
+- Final line (Closing, <=8s left): one clear action; subtly echo topic for loop feel
+
+Rules:
+1) Produce exactly {turns} lines (all spoken by 'N'), concise one sentence each.
+2) Prefix each line with 'N:'.
+3) {lang_rules}
+4) EN: <=12 words/line. JA: keep concise (~<=20 mora).
+5) Avoid lists, stage directions, emojis.
+6) Output ONLY the lines (no explanations).
+"""
+    else:
+        # ── 会話優先プロンプト（Alice/Bob 交互） ─────────────────────
+        user = f"""
 You are a native-level {lang.upper()} dialogue writer.
 
 Write a short, natural 2-person conversation in {lang} between Alice and Bob.
 Scene topic: {topic_hint}
-Tone reference (seed phrase): "{seed_phrase}" (style hint only; do not repeat literally)
+Tone ref (seed): "{seed_phrase}" (style hint only; do not repeat literally)
+Mode: {mode} ({mode_guide})
 
 STRUCTURE (map to alternating lines):
-- Line1 (Hook, 0–2s): bold claim or question that pulls attention
-- Lines2–4 (Beats 1–2): add a change of pattern (numbers, contrast, example)
+- Line1 (Hook, 0–2s): bold claim or question
+- Lines2–4 (Beats 1–2): pattern change (numbers, contrast, example)
 - Lines5–6 (Beat 3): one concrete, visual tip/example
-- Final line (Closing, <=8s left): one clear action; subtly echo the topic for loop feel
+- Final line (Closing, <=8s left): one clear action; subtly echo topic for loop feel
 
 Rules:
 1) Alternate strictly: Alice:, Bob:, Alice:, Bob: ... until exactly {turns * 2} lines.
 2) Each line = one short sentence; no lists, no stage directions, no emojis.
 3) {lang_rules}
-4) EN: <=12 words/line. JA: keep concise (~<=20 mora feel).
-5) Avoid repetitive endings; vary rhythm/phrasing every ~8 seconds.
+4) EN: <=12 words/line. JA: keep concise (~<=20 mora).
+5) Avoid repetitive endings; vary rhythm every ~8 seconds.
 6) Output ONLY the dialogue lines. No explanations.
 """
 
     rsp = openai.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": user}],
-        temperature=0.6,   # 伸びる言い回し＋安定性のバランス
+        temperature=0.6,
         timeout=45,
     )
 
     raw_lines = (rsp.choices[0].message.content or "").strip().splitlines()
-    # "Alice:" / "Bob:" で始まる行のみ抽出
-    lines = [l.strip() for l in raw_lines if l.strip().startswith(("Alice:", "Bob:"))]
+    result: List[Tuple[str, str]] = []
 
-    # 余剰カット・不足は交互で補完（中身が空なら最短の埋め草）
+    if is_monologue:
+        # "N:" 行のみを採用。足りなければ埋め草、超過はカット。
+        lines = [l.strip() for l in raw_lines if l.strip().startswith("N:")]
+        lines = lines[:turns]
+        while len(lines) < turns:
+            lines.append("N:")  # 空でも後段でフォールバック
+        for ln in lines:
+            spk, txt = ("N", ln.split(":", 1)[1].strip()) if ":" in ln else ("N", "")
+            txt = _sanitize_line(lang, txt) or _fallback_line(lang)
+            result.append((spk, txt))
+        return result
+
+    # 会話モード："Alice:" / "Bob:" のみ採用
+    lines = [l.strip() for l in raw_lines if l.strip().startswith(("Alice:", "Bob:"))]
     lines = lines[: turns * 2]
     while len(lines) < turns * 2:
         lines.append("Alice:" if len(lines) % 2 == 0 else "Bob:")
 
-    parsed: List[Tuple[str, str]] = []
     for idx, ln in enumerate(lines):
         if ":" in ln:
             spk, txt = ln.split(":", 1)
@@ -118,15 +156,7 @@ Rules:
         else:
             spk = "Alice" if idx % 2 == 0 else "Bob"
             txt = ""
-
         txt = _sanitize_line(lang, txt) or _fallback_line(lang)
-        parsed.append((spk.strip(), txt))
+        result.append((spk.strip(), txt))
 
-    # 念のため先頭/末尾の“役割”は最低限守られているように軽整形（内容はAIに任せる）
-    # ここでは書き換えすぎない。空で来たら埋め草のみ。
-    if not parsed[0][1]:
-        parsed[0] = (parsed[0][0], _fallback_line(lang))
-    if not parsed[-1][1]:
-        parsed[-1] = (parsed[-1][0], _fallback_line(lang))
-
-    return parsed
+    return result
