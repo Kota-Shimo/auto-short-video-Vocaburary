@@ -54,21 +54,20 @@ jobs:
           echo "$YT_ACC5" | base64 -d > tokens/token_acc5.pkl
           echo "$YT_ACC6" | base64 -d > tokens/token_acc6.pkl
 
-      # 🎲 モードをランダム選択
       - name: 🎲 Pick content mode (random)
         id: mode
+        shell: bash
         run: |
           MODES=(dialogue howto listicle wisdom fact qa)
           MODE=${MODES[$RANDOM % ${#MODES[@]}]}
-          echo "mode=$MODE"
-          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "mode=$MODE" | tee -a "$GITHUB_OUTPUT"
 
-      # 📝 選ばれたモードに合わせてトピックを決定（heredocで安全）
       - name: 📝 Pick today’s topic
         id: topic
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           MODE: ${{ steps.mode.outputs.mode }}
+        shell: bash
         run: |
           topic=$(python - <<'PY'
 from topic_picker import pick_by_content_type
@@ -76,9 +75,8 @@ import os
 print(pick_by_content_type(os.environ.get("MODE","wisdom"), "ja"))
 PY
 )
-          echo "topic=$topic" >> "$GITHUB_OUTPUT"
+          echo "topic=$topic" | tee -a "$GITHUB_OUTPUT"
 
-      # 🎬 生成＆アップロード（CONTENT_MODE にランダムモードを渡す）
       - name: 🎬 Build & Upload All Combos
         env:
           OPENAI_API_KEY:      ${{ secrets.OPENAI_API_KEY }}
