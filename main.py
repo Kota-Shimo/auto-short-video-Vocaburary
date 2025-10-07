@@ -8,8 +8,10 @@ main.py – GPTで台本（伸びる構成）→ OpenAI TTS → 「lines.json & 
 - CONTENT_MODE（dialogue/howto/listicle/wisdom/fact/qa）で“伸びる構成”に最適化
 - topic="AUTO" で当日トピックを自動選択（pick_by_content_type）
 - seed hook を強化（_make_seed_phrase）
+- TTS に行ごとの style（energetic/calm/serious/neutral）を付与
+- 行間に短い無音ギャップを付加（聴感テンポ改善）
 
-既存仕様は維持（roleplayの (spk, line) → lines.json 形式 / 複数字幕行 / chunk_builder連携）
+既存仕様は維持（roleplayの (spk, line) → lines.json 形式 / 複数字幕行 / chunk_builder 連携）
 """
 
 import argparse, logging, re, json, subprocess, os
@@ -24,7 +26,7 @@ from openai import OpenAI
 from config         import BASE, OUTPUT, TEMP
 from dialogue       import make_dialogue  # ← mode対応＆伸びる構成で生成（互換API）
 from translate      import translate
-from tts_openai     import speak
+from tts_openai     import speak          # ← style 対応版
 from audio_fx       import enhance
 from bg_image       import fetch as fetch_bg
 from thumbnail      import make_thumbnail
@@ -98,7 +100,7 @@ def _make_seed_phrase(topic: str, lang_code: str) -> str:
         return ""
 
 # ───────────────────────────────────────────────
-# YouTube タイトル・説明・タグ生成（既存ロジック維持）
+# YouTube タイトル・説明・タグ生成（現状ロジック維持）
 # ───────────────────────────────────────────────
 def make_title(topic, title_lang: str):
     if title_lang == "ja":
@@ -152,24 +154,47 @@ def make_tags(topic, audio_lang, subs, title_lang):
     return list(dict.fromkeys(tags))[:15]
 
 # ───────────────────────────────────────────────
-# 音声結合・トリム
+# 行ごとの TTS スタイルを決める（Hook/中盤/締め）
 # ───────────────────────────────────────────────
-def _concat_trim_to(mp_paths, max_sec):
+def _style_for_line(idx: int, total: int, mode: str) -> str:
+    # 先頭は注意喚起、末尾は締めを落ち着かせる
+    if idx == 0:
+        return "energetic"
+    if idx == total - 1:
+        return "calm" if mode in ("wisdom", "fact") else "serious"
+    # 中盤は HowTo/Listicle/QA なら断定寄せでテンポ良く
+    if mode in ("howto", "listicle", "qa"):
+        return "serious" if idx in (2, 3) else "neutral"
+    return "neutral"
+
+# ───────────────────────────────────────────────
+# 音声結合・トリム（行間に短い無音ギャップを挿入）
+# ───────────────────────────────────────────────
+def _concat_trim_to(mp_paths, max_sec, gap_ms=120):
     max_ms = int(max_sec * 1000)
     combined = AudioSegment.silent(duration=0)
     new_durs, elapsed = [], 0
-    for p in mp_paths:
+    for idx, p in enumerate(mp_paths):
         seg = AudioSegment.from_file(p)
         seg_ms = len(seg)
-        if elapsed + seg_ms <= max_ms:
+        extra = gap_ms if idx < len(mp_paths)-1 else 0
+        need = seg_ms + extra
+        if elapsed + need <= max_ms:
             combined += seg
             new_durs.append(seg_ms/1000)
             elapsed += seg_ms
+            if extra:
+                combined += AudioSegment.silent(duration=gap_ms)
+                elapsed += gap_ms
         else:
             remain = max_ms - elapsed
             if remain > 0:
-                combined += seg[:remain]
-                new_durs.append(remain/1000)
+                if remain <= seg_ms:
+                    combined += seg[:remain]
+                    new_durs.append(remain/1000)
+                else:
+                    combined += seg
+                    new_durs.append(seg_ms/1000)
             break
     (TEMP/"full_raw.mp3").unlink(missing_ok=True)
     combined.export(TEMP/"full_raw.mp3", format="mp3")
@@ -181,31 +206,31 @@ def _concat_trim_to(mp_paths, max_sec):
 def run_one(topic, turns, audio_lang, subs, title_lang, yt_privacy, account, do_upload, chunk_size):
     reset_temp()
 
-    # トピック（日本語→各言語に翻訳してから生成すると、各言語の自然さが増す）
+    # トピック（日本語→各言語に翻訳してから生成すると自然）
     topic_for_dialogue = translate(topic, audio_lang) if audio_lang != "ja" else topic
 
     # 強めのhookを先に作って台本に渡す
     seed_phrase = _make_seed_phrase(topic_for_dialogue, audio_lang)
 
-    # 伸びる構成の台本を roleplay 形式で取得（互換: List[(spk, line)])
+    # 伸びる構成の台本（互換: List[(spk, line)])
     dialogue = make_dialogue(
         topic_for_dialogue, audio_lang, turns,
         seed_phrase=seed_phrase, mode=CONTENT_MODE
     )
 
     # 音声＆字幕
+    valid_dialogue = [(spk, line) for (spk, line) in dialogue if line.strip()]
     mp_parts, sub_rows = [], [[] for _ in subs]
-    for i, (spk, line) in enumerate(dialogue, 1):
-        if not line.strip(): 
-            continue
+    for i, (spk, line) in enumerate(valid_dialogue, 1):
         mp = TEMP / f"{i:02d}.mp3"
-        speak(audio_lang, spk, line, mp)  # 既存TTS
+        style = _style_for_line(i-1, len(valid_dialogue), CONTENT_MODE)  # ← 行ごとの感情
+        speak(audio_lang, spk, line, mp, style=style)
         mp_parts.append(mp)
         for r, lang in enumerate(subs):
             sub_rows[r].append(line if lang==audio_lang else translate(line, lang))
 
     # 結合・整音
-    new_durs = _concat_trim_to(mp_parts, MAX_SHORTS_SEC)
+    new_durs = _concat_trim_to(mp_parts, MAX_SHORTS_SEC, gap_ms=120)
     enhance(TEMP/"full_raw.mp3", TEMP/"full.mp3")
 
     # 背景
@@ -213,7 +238,6 @@ def run_one(topic, turns, audio_lang, subs, title_lang, yt_privacy, account, do_
     fetch_bg(topic, bg_png)
 
     # 台本行数とオーディオ尺の整合
-    valid_dialogue = [d for d in dialogue if d[1].strip()]
     valid_dialogue = valid_dialogue[:len(new_durs)]
 
     # lines.json 生成（[spk, sub1, sub2, ..., dur]）
