@@ -1,142 +1,132 @@
-"""Generate a two-person *discussion / roleplay* script via GPT-4o
-with strict monolingual output, hook support, and a light loop-back ending.
+# dialogue.py
+"""Generate a two-person roleplay script via GPT-4o with a growth-oriented structure.
+   - Backward compatible: returns List[(speaker, text)] with 'Alice'/'Bob' alternating.
+   - Adds `mode` to control patterns: dialogue/howto/listicle/wisdom/fact/qa
+   - Enforces hook → 3 beats → closing, short lines, no code-switching.
 """
 
 from typing import List, Tuple
 import re
+import os
 from openai import OpenAI
 from config import OPENAI_API_KEY
 
 openai = OpenAI(api_key=OPENAI_API_KEY)
 
+# ─────────────────────────────────────────
+# Mode guides (内部で“伸びる構成”を強制)
+# ─────────────────────────────────────────
+_MODE_GUIDE = {
+    "dialogue": "Real-life roleplay. Hook(0-2s) -> Turn1 -> Turn2 -> Turn3 -> Closing(<=8s left). Keep universal.",
+    "howto":    "Actionable 3 steps. Hook -> Step1 -> Step2 -> Step3 -> Closing.",
+    "listicle": "3 points. Hook -> Point1 -> Point2 -> Point3 -> Closing.",
+    "wisdom":   "Motivational. Hook -> Key1 -> Key2 -> Key3 -> Closing.",
+    "fact":     "Micro-knowledge. Hook -> Fact1 -> Fact2 -> Fact3 -> Closing.",
+    "qa":       "NG/OK/Pro. Hook -> NG -> OK -> Pro -> Closing.",
+}
 
-# --------------------------- language helpers ---------------------------
-
-def _lang_rules(lang: str, topic_hint: str) -> str:
-    """
-    Strong, language-specific constraints to prevent code-switching
-    *without* destroying proper nouns or airline codes, etc.
-    """
+def _lang_rules(lang: str) -> str:
+    """Language-specific constraints to avoid code-switching."""
     if lang == "ja":
-        # 日本語台本の英語混入を避けつつ、固有名詞は許可
+        # 日本語台本の英語・ローマ字混入を強く禁止
         return (
-            "This is a Japanese listening script. Use natural Japanese only. "
-            "Avoid English words and romaji (Latin letters) *except* for proper nouns or codes "
-            "(e.g., JAL, ANA, QRコード). Do not translate or explain such proper nouns; keep them as-is. "
-            "Ignore any implication that English should appear even if the topic contains '英語'."
+            "This is a Japanese listening script. "
+            "Use pure Japanese only. "
+            "Do NOT include any English words, romaji (Latin letters), or code-switching. "
+            "Ignore any implication that English should appear even if the topic contains '英語'. "
+            "Natural Japanese only."
         )
     return f"Stay entirely in {lang}. Avoid mixing other languages."
 
-
-# できるだけ“意味を削らない”軽い整形だけにする
-_LATIN = re.compile(r"[A-Za-z]")
-
-def _fallback_line(lang: str) -> str:
-    return {
-        "ja": "はい。",
-        "ko": "네.",
-        "es": "Vale.",
-        "pt": "Certo.",
-        "id": "Oke.",
-        "en": "Okay."
-    }.get(lang, "Okay.")
-
 def _sanitize_line(lang: str, text: str) -> str:
-    """
-    Light post-processing for TTS/字幕安定化:
-      - 改行/空白の正規化
-      - 三点リーダの揺れ統一
-      - 日本語のみ、末尾に句読点を補う（無音終止を避ける）
-    ※ アルファベット削除は行わない（JAL, ANA などを温存）
-    """
-    txt = (text or "").strip()
-    if not txt:
-        return _fallback_line(lang)
-
-    # 共通の軽い整形
-    txt = txt.replace("…", "…").replace("...", "…")
-    txt = re.sub(r"\s+", " ", txt).strip()
-
+    """TTSが詰まりやすい要素を軽減。"""
+    txt = text.strip()
     if lang == "ja":
-        # 末尾に句読点が無ければ「。」を補う（TTSが自然に止まる）
-        if not re.search(r"[。！？!?]$", txt):
-            txt += "。"
-
+        txt = re.sub(r"[A-Za-z]+", "", txt)           # ローマ字/英単語除去（数字は保持）
+        txt = txt.replace("...", "。").replace("…", "。")
+        txt = re.sub(r"\s*:\s*", ": ", txt)
+        txt = re.sub(r"\s+", " ", txt).strip()
+    else:
+        txt = txt.replace("…", "...").strip()
     return txt
 
-
-def _extract_dialogue_lines(raw: str) -> List[str]:
-    """
-    GPTの出力から "Alice:" / "Bob:" 行だけを安全に抽出。
-    例: "1) Alice: ..." や "- Bob: ..." も拾う。
-    """
-    out: List[str] = []
-    for ln in (raw or "").splitlines():
-        ln = ln.strip()
-        m = re.match(r"^\s*(?:\d+[\).\-\s]*)?(Alice|Bob)\s*:\s*(.*)$", ln, flags=re.IGNORECASE)
-        if m:
-            speaker = "Alice" if m.group(1).lower() == "alice" else "Bob"
-            text = m.group(2).strip()
-            out.append(f"{speaker}: {text}")
-    return out
-
-
-# --------------------------- main entry ---------------------------
+def _fallback_line(lang: str) -> str:
+    return "はい。" if lang == "ja" else "Okay."
 
 def make_dialogue(
     topic: str,
     lang: str,
     turns: int = 8,
-    seed_phrase: str = ""
+    seed_phrase: str = "",
+    mode: str = "dialogue",
 ) -> List[Tuple[str, str]]:
     """
-    - Alice/Bob が交互に話す短い自然会話を生成（厳密に 2*turns 行）
-    - seed_phrase は“ムード/スタイルのヒント”として使用（逐語の繰り返しは禁止）
-    - 最終行は話題やフックを軽くリフレインしてループ感を演出
-    - 日本語は“英語混入を避けつつ固有名詞は許容”のプロンプトを付与
-    - 出力後の整形は最小限（意味の削除は行わない）
+    Returns: List[(speaker, text)] with strict alternation 'Alice'/'Bob'.
+    - first line acts as Hook, last line as Closing（軽くループ感）
+    - 中間は 3ビート（数字/具体例/言い換えで変化を付ける）
+    - `mode` によって内容の型を変えるが、出力フォーマットは常に同じ
     """
-    # 日本語だけ括弧でトピックを補助表示
     topic_hint = f"「{topic}」" if lang == "ja" else topic
-    lang_rules = _lang_rules(lang, topic_hint)
+    lang_rules = _lang_rules(lang)
+    mode_guide = _MODE_GUIDE.get(mode, _MODE_GUIDE["dialogue"])
 
-    prompt = (
-        f"You are a native-level {lang.upper()} dialogue writer.\n"
-        f"Write a short, natural conversation in {lang} between Alice and Bob.\n\n"
-        f"Scene topic: {topic_hint}\n"
-        f"Tone reference (seed phrase): \"{seed_phrase}\" "
-        f"(use only as mood/style hint; do not repeat it literally).\n\n"
-        "Rules:\n"
-        "1) Alternate strictly: Alice, Bob, Alice, Bob...\n"
-        f"2) Produce exactly {turns * 2} lines.\n"
-        "3) Each line begins with 'Alice:' or 'Bob:' and contains one short, natural sentence.\n"
-        f"4) {lang_rules}\n"
-        "5) No ellipses beyond a single one (…); no emojis; no bullet points; no stage directions.\n"
-        "6) Keep it friendly, realistic, and concise.\n"
-        "7) Make the final line subtly echo the main topic or hook to feel loopable.\n"
-        "8) Output ONLY the dialogue lines (no explanations).\n"
-    )
+    # GPT へのプロンプト（“伸びる構成”を交互会話にマッピング）
+    # 1行は短く：EN<=12 words / JAは~20モーラ目安
+    user = f"""
+You are a native-level {lang.upper()} dialogue writer.
+
+Write a short, natural 2-person conversation in {lang} between Alice and Bob.
+Scene topic: {topic_hint}
+Tone reference (seed phrase): "{seed_phrase}" (style hint only; do not repeat literally)
+
+STRUCTURE (map to alternating lines):
+- Line1 (Hook, 0–2s): bold claim or question that pulls attention
+- Lines2–4 (Beats 1–2): add a change of pattern (numbers, contrast, example)
+- Lines5–6 (Beat 3): one concrete, visual tip/example
+- Final line (Closing, <=8s left): one clear action; subtly echo the topic for loop feel
+
+Rules:
+1) Alternate strictly: Alice:, Bob:, Alice:, Bob: ... until exactly {turns * 2} lines.
+2) Each line = one short sentence; no lists, no stage directions, no emojis.
+3) {lang_rules}
+4) EN: <=12 words/line. JA: keep concise (~<=20 mora feel).
+5) Avoid repetitive endings; vary rhythm/phrasing every ~8 seconds.
+6) Output ONLY the dialogue lines. No explanations.
+"""
 
     rsp = openai.chat.completions.create(
         model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.45,
+        messages=[{"role": "user", "content": user}],
+        temperature=0.6,   # 伸びる言い回し＋安定性のバランス
+        timeout=45,
     )
 
-    # 抽出（余分な見出し/番号は無視）
-    raw_lines = _extract_dialogue_lines(rsp.choices[0].message.content)
+    raw_lines = (rsp.choices[0].message.content or "").strip().splitlines()
+    # "Alice:" / "Bob:" で始まる行のみ抽出
+    lines = [l.strip() for l in raw_lines if l.strip().startswith(("Alice:", "Bob:"))]
 
-    # 行数調整：過剰カット & 不足を交互に補完
-    raw_lines = raw_lines[: turns * 2]
-    while len(raw_lines) < turns * 2:
-        # スピーカーは交互に補完
-        spk = "Alice" if len(raw_lines) % 2 == 0 else "Bob"
-        raw_lines.append(f"{spk}: {_fallback_line(lang)}")
+    # 余剰カット・不足は交互で補完（中身が空なら最短の埋め草）
+    lines = lines[: turns * 2]
+    while len(lines) < turns * 2:
+        lines.append("Alice:" if len(lines) % 2 == 0 else "Bob:")
 
-    # "Alice: こんにちは" → ("Alice", "こんにちは") に整形＋軽いクリーンアップ
     parsed: List[Tuple[str, str]] = []
-    for ln in raw_lines:
-        spk, txt = ln.split(":", 1)
-        parsed.append((spk.strip(), _sanitize_line(lang, txt)))
+    for idx, ln in enumerate(lines):
+        if ":" in ln:
+            spk, txt = ln.split(":", 1)
+            txt = txt.strip()
+        else:
+            spk = "Alice" if idx % 2 == 0 else "Bob"
+            txt = ""
+
+        txt = _sanitize_line(lang, txt) or _fallback_line(lang)
+        parsed.append((spk.strip(), txt))
+
+    # 念のため先頭/末尾の“役割”は最低限守られているように軽整形（内容はAIに任せる）
+    # ここでは書き換えすぎない。空で来たら埋め草のみ。
+    if not parsed[0][1]:
+        parsed[0] = (parsed[0][0], _fallback_line(lang))
+    if not parsed[-1][1]:
+        parsed[-1] = (parsed[-1][0], _fallback_line(lang))
 
     return parsed
