@@ -190,33 +190,48 @@ def _style_for_line(idx: int, total: int, mode: str) -> str:
 # 音声結合・トリム（行間に無音ギャップ）
 # ───────────────────────────────────────────────
 def _concat_trim_to(mp_paths, max_sec, gap_ms=120):
+    from pydub import AudioSegment
     max_ms = int(max_sec * 1000)
     combined = AudioSegment.silent(duration=0)
     new_durs, elapsed = [], 0
+
     for idx, p in enumerate(mp_paths):
         seg = AudioSegment.from_file(p)
         seg_ms = len(seg)
-        extra = gap_ms if idx < len(mp_paths)-1 else 0
+        extra = gap_ms if idx < len(mp_paths) - 1 else 0  # 最後以外は無音を付与
         need = seg_ms + extra
-        if elapsed + need <= max_ms:
+
+        remain = max_ms - elapsed
+        if remain <= 0:
+            break
+
+        if need <= remain:
+            # セリフ＋（最後以外は）無音をフルで入る
             combined += seg
-            new_durs.append(seg_ms/1000)
             elapsed += seg_ms
             if extra:
-                combined += AudioSegment.silent(duration=gap_ms)
-                elapsed += gap_ms
+                combined += AudioSegment.silent(duration=extra)
+                elapsed += extra
+            new_durs.append((seg_ms + extra) / 1000.0)
         else:
-            remain = max_ms - elapsed
-            if remain > 0:
-                if remain <= seg_ms:
-                    combined += seg[:remain]
-                    new_durs.append(remain/1000)
-                else:
-                    combined += seg
-                    new_durs.append(seg_ms/1000)
+            # 端数しか入らない
+            if remain <= seg_ms:
+                # セリフ途中で終わる
+                combined += seg[:remain]
+                new_durs.append(remain / 1000.0)
+                elapsed += remain
+            else:
+                # セリフ全部＋無音の一部だけ入る
+                used_gap = remain - seg_ms
+                combined += seg
+                if used_gap > 0:
+                    combined += AudioSegment.silent(duration=used_gap)
+                new_durs.append((seg_ms + used_gap) / 1000.0)
+                elapsed += seg_ms + used_gap
             break
-    (TEMP/"full_raw.mp3").unlink(missing_ok=True)
-    combined.export(TEMP/"full_raw.mp3", format="mp3")
+
+    (TEMP / "full_raw.mp3").unlink(missing_ok=True)
+    combined.export(TEMP / "full_raw.mp3", format="mp3")
     return new_durs
 
 # ───────────────────────────────────────────────
