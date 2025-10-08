@@ -7,6 +7,10 @@ Pick TODAY’s podcast/video topic.
   自動的に “ホテルでのチェックイン会話” のような自然表現へ正規化（dialogue時）
 - API 失敗時は SEED_TOPICS からフォールバック
 - 生成は常に「日本語」→ main.py 側で各音声言語に翻訳（多言語コンボとの整合を保つ）
+
+※ 学習寄り強化：
+  dialogue / qa / howto / listicle のときは
+  『<場面>で使える<ターゲット><終端>』の人気フォーマットで即時生成（ノーAPI）。
 """
 
 import os
@@ -138,20 +142,35 @@ def pick() -> str:
         return random.choice(SEED_TOPICS)
 
 # ────────────────────────────────────────
-# ✅ コンテンツタイプ別トピック生成（国/言語に依存しないガイド）
+# ✅ コンテンツタイプ別トピック生成（学習寄せ：「〜で使える〇〇」優先）
 # ────────────────────────────────────────
+
+# 学習フォーマット用の候補（国/文化に依存しない汎用シーンのみ）
+_SCENES = [
+    "自己紹介", "面接", "予約", "受付", "支払い", "道案内", "電話対応",
+    "オンライン会議", "確認のやりとり", "依頼のやりとり", "謝罪", "予定変更",
+    "レストランの注文", "空港のチェックイン", "ホテルのチェックイン",
+]
+_TARGETS = [
+    "丁寧フレーズ", "基本表現", "依頼の言い方", "断り方", "確認フレーズ",
+    "相槌", "クッション言葉", "時間の聞き方", "理由の伝え方",
+]
+_ENDINGS = ["3選", "一言", "言い方", "基本", "厳選"]
+
+def _mk_learning_topic() -> str:
+    """『<場面>で使える<ターゲット><終端>』で短く返す。"""
+    scene  = random.choice(_SCENES)
+    target = random.choice(_TARGETS)
+    end    = random.choice(_ENDINGS)
+    s = f"{scene}で使える{target}{end}"
+    return s[:24]  # 日本語は長くなりがちなので軽く丸める
+
 GUIDE = {
-    # 誰でも遭遇するシーン名の提案（最終的に main.py 側で各言語へ翻訳して使う）
     "dialogue": "誰でも遭遇する生活/仕事シーン名（例: チェックイン会話、注文会話、道を尋ねるやりとり）。",
-    # HowTo：30秒で実践できる、行動に移しやすい汎用コツ
     "howto":    "30秒で実践できるコツ（例: 伝わりやすく話す3ステップ、集中力を上げるコツ3つ）。",
-    # Listicle：3点構成で学べる普遍的話題
-    "listicle": "3ポイントで学べるテーマ（例: 相手の心を掴むコツ3つ、印象が良くなる言い回し3選）。",
-    # Wisdom：短い知恵/名言（学習/継続/行動に結びつくもの）
+    "listicle": "3ポイントで学べるテーマ（例: 心を掴むコツ3つ、印象が良くなる言い回し3選）。",
     "wisdom":   "短い知恵・名言（例: 先延ばしを防ぐ一言、続けるための小さな仕組み）。",
-    # Fact：文化・コミュニケーションの豆知識（特定の国に固定しない）
     "fact":     "文化やコミュニケーションの豆知識（例: 相づちの違い、言葉の由来など）。",
-    # QA：誤解されやすい表現や言い換え（NG→OK→Pro など）
     "qa":       "誤解されやすいQ&A（例: NG→OK→Proの言い換え、あるあるの勘違い）。",
 }
 
@@ -159,18 +178,24 @@ def pick_by_content_type(content_type: str, audio_lang: str) -> str:
     """
     コンテンツ種別に応じて、誰でも刺さる“伸びる”ショート動画トピックを1行返す。
     - 生成は常に日本語（後段で各音声言語に翻訳するため）
-    - dialogue のときのみ会話シーン名として正規化
+    - dialogue / qa / howto / listicle → 『〜で使える〜』の学習フォーマットで即時生成（API不要）
+    - wisdom / fact → GUIDE を使い GPT で1行生成（従来系）
+    - dialogue のみに旧式トピックが来た場合の正規化（_normalize）
     """
-    today = datetime.date.today().isoformat()
     ct = (content_type or "dialogue").lower()
-    guide = GUIDE.get(ct, GUIDE["dialogue"])
 
+    # 学習フォーマットを優先（安定・短時間・低コスト）
+    if ct in {"dialogue", "qa", "howto", "listicle"}:
+        return _mk_learning_topic()
+
+    # wisdom / fact は GPT で生成（短い1行）
+    today = datetime.date.today().isoformat()
+    guide = GUIDE.get(ct, GUIDE["dialogue"])
     prompt = (
         f"Today is {today}. "
         f"日本語で、{guide} "
         "句読点や引用符なしで自然な1行だけ返してください。"
     )
-
     try:
         rsp = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -183,7 +208,7 @@ def pick_by_content_type(content_type: str, audio_lang: str) -> str:
             raw = _normalize(raw)
         if not raw or re.search(r"[A-Za-z]", raw):
             return random.choice(SEED_TOPICS)
-        return raw
+        return raw[:24]
     except Exception:
         return random.choice(SEED_TOPICS)
 
