@@ -67,9 +67,20 @@ LEARN_KEYWORDS = [
 
 def score_title(t: str) -> int:
     score = 0
-    if any(t.startswith(k) for k in TOP_KEYWORDS): score += 20
-    if re.search(r"\d+|チェックイン|注文|予約|空港|ホテル|レストラン|面接|受付|道案内|支払い", t): score += 15
-    # 28文字以内を優遇
+    # ① シーン系キーワード（従来）
+    if any(t.startswith(k) for k in TOP_KEYWORDS):
+        score += 20
+    if re.search(r"\d+|チェックイン|注文|予約|空港|ホテル|レストラン|面接|受付|道案内|支払い", t):
+        score += 15
+
+    # ② 学習系ワード（★追加：強めに加点）
+    if any(k in t for k in LEARN_KEYWORDS):
+        score += 25
+    # 具体的な“学習っぽさ”のパターンをさらに加点
+    if re.search(r"(で使える|でよく使う|便利|自然な|丁寧な|言い換え|言い方|フレーズ|例文|テンプレ|コツ|3選|5選|NG|OK|Pro)", t):
+        score += 15
+
+    # ③ 28文字以内を優遇（従来）
     score += max(0, 15 - max(0, len(t) - 28))
     return score
 
