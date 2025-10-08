@@ -33,12 +33,22 @@ MONOLOGUE_MODES = {"wisdom", "fact"}
 def _lang_rules(lang: str) -> str:
     """
     出力言語を厳密に単一化し、他言語/他文字体系や翻訳注釈を禁止。
-    ここでは特定の言語名・国名は指示に含めない（出力も中立化のため）。
+    出力内に言語名・国名・学習者呼称を出さない。
     """
+    # 日本語は特に英字・他言語が紛れやすいので厳格に禁止
+    if lang == "ja":
+        return (
+            "Write entirely in Japanese. "
+            "Do not include Latin letters, non-Japanese words, or code-switching. "
+            "No translation glosses or bracketed meanings. "
+            "Do not mention any language names, nationalities, or countries."
+        )
+    # その他言語（出力側は中立だが、生成指示には言語を明示）
     return (
-        f"This script must be written entirely in {lang}. "
-        "Do NOT code-switch. Do NOT include other languages or writing systems. "
-        "No translations, no glosses, no brackets for meanings."
+        f"Write entirely in {lang}. "
+        "Do not code-switch or include other languages/writing systems. "
+        "No translation glosses or bracketed meanings. "
+        "Do not mention any language names, nationalities, or countries."
     )
 
 # ─────────────────────────────────────────
@@ -47,10 +57,17 @@ def _lang_rules(lang: str) -> str:
 def _sanitize_line(lang: str, text: str) -> str:
     txt = text.strip()
     if lang == "ja":
-        txt = re.sub(r"[A-Za-z]+", "", txt)           # ローマ字/英単語除去（数字は保持）
+        # ローマ字/英単語除去（数字は保持）
+        txt = re.sub(r"[A-Za-z]+", "", txt)
+        # 三点リーダなどを句点へ
         txt = txt.replace("...", "。").replace("…", "。")
+        # ラベルのコロン周り整形
         txt = re.sub(r"\s*:\s*", ": ", txt)
+        # 余分な空白圧縮
         txt = re.sub(r"\s+", " ", txt).strip()
+        # 末尾が中途半端なら軽く締める
+        if txt and txt[-1] not in "。！？…!?":
+            txt += "。"
     else:
         txt = txt.replace("…", "...").strip()
     return txt
@@ -70,8 +87,8 @@ def make_dialogue(
 ) -> List[Tuple[str, str]]:
     """
     Returns: List[(speaker, text)]
-    - dialogue/howto/listicle/qa → Alice/Bob 交互の会話中心
-    - wisdom/fact → N（Narrator）中心のモノローグ（必要に応じて A/B を少しだけ使う可）
+    - dialogue/howto/listicle/qa → Alice/Bob 交互の会話中心（合計 2*turns 行）
+    - wisdom/fact → N（Narrator）中心のモノローグ（合計 turns 行）
     - Hook → 3ビート → Closing（ループ感）を強制
     - 出力は中立：特定の言語名・国名・学習者呼称を出さない
     """
@@ -92,14 +109,14 @@ def make_dialogue(
     extra_rule = ""
     if mode == "dialogue":
         extra_rule = (
-            "Include exactly one short learning tip *within* the dialogue "
+            "Include exactly one short learning tip within the dialogue "
             "(e.g., a softer request, a natural confirmation, or a polite nuance), "
             "without mentioning any language names, countries, or learners."
         )
     elif mode == "fact":
         extra_rule = (
             "Include one short, surprising point about communication or cultural nuance, "
-            "and add one concise example expression that fits the scene. "
+            "plus one concise example expression that fits the scene. "
             "Do not mention any language names or countries."
         )
     elif mode == "howto":
@@ -125,7 +142,7 @@ def make_dialogue(
         )
 
     if is_monologue:
-        # ── モノローグ優先プロンプト ───────────────────────────────
+        # ── モノローグ（N のみ） ───────────────────────────────
         user = f"""
 You are a native-level narration writer.
 
@@ -151,7 +168,7 @@ Rules:
 7) Output ONLY the lines (no explanations).
 """.strip()
     else:
-        # ── 会話優先プロンプト（Alice/Bob 交互） ─────────────────────
+        # ── 会話（Alice/Bob 交互） ─────────────────────────────
         user = f"""
 You are a native-level dialogue writer.
 
