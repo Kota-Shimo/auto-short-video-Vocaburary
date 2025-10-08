@@ -84,6 +84,6 @@ jobs:
           CONTENT_MODE:        ${{ steps.mode.outputs.mode }}
         run: |
           python main.py "${{ steps.topic.outputs.topic }}" \
-            --turns 6 \
+            --turns 8 \
             --privacy public \
             --chunk 40
