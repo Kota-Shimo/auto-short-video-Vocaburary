@@ -10,9 +10,8 @@ main.py – GPTで台本（伸びる構成）→ OpenAI TTS → 「lines.json & 
 - seed hook を強化（_make_seed_phrase）
 - 行ごとの TTS スタイル（energetic/calm/serious/neutral）
 - 行間に短い無音ギャップ（聴感テンポ改善）
-- タイトル/タグを中立化（特定言語や国に依存しないワーディング）
-
-既存仕様は維持（(spk, line) → lines.json / 複数字幕行 / chunk_builder 連携）
+- タイトル/タグを中立化＋学習語に寄せてスコアリング
+- 🔤（追加）日本語タイトル時は音声言語に応じて「◯◯語会話」を自然に付与
 """
 
 import argparse, logging, re, json, subprocess, os
@@ -25,9 +24,9 @@ from pydub import AudioSegment
 from openai import OpenAI
 
 from config         import BASE, OUTPUT, TEMP
-from dialogue       import make_dialogue  # ← mode対応＆伸びる構成で生成（互換API）
+from dialogue       import make_dialogue
 from translate      import translate
-from tts_openai     import speak          # ← style 対応必須（なければ下の補足を適用）
+from tts_openai     import speak
 from audio_fx       import enhance
 from bg_image       import fetch as fetch_bg
 from thumbnail      import make_thumbnail
@@ -57,7 +56,7 @@ def sanitize_title(raw: str) -> str:
 # 中立キーワード（特定言語/国に依存しない）
 TOP_KEYWORDS = ["ホテル", "空港", "レストラン", "自己紹介", "予約", "面接", "受付", "支払い", "道案内"]
 
-# ★ 学習ニーズを強く示すキーワード（スコアを上げるために追加）
+# 学習ニーズを強く示すキーワード（スコアを上げる）
 LEARN_KEYWORDS = [
     "フレーズ", "表現", "例文", "言い方", "言い換え", "丁寧", "自然", "敬語",
     "発音", "リスニング", "スピーキング", "語彙", "単語", "文法",
@@ -67,26 +66,33 @@ LEARN_KEYWORDS = [
 
 def score_title(t: str) -> int:
     score = 0
-    # ① シーン系キーワード（従来）
+    # ① シーン系キーワード
     if any(t.startswith(k) for k in TOP_KEYWORDS):
         score += 20
     if re.search(r"\d+|チェックイン|注文|予約|空港|ホテル|レストラン|面接|受付|道案内|支払い", t):
         score += 15
-
-    # ② 学習系ワード（★追加：強めに加点）
+    # ② 学習系ワード
     if any(k in t for k in LEARN_KEYWORDS):
         score += 25
-    # 具体的な“学習っぽさ”のパターンをさらに加点
     if re.search(r"(で使える|でよく使う|便利|自然な|丁寧な|言い換え|言い方|フレーズ|例文|テンプレ|コツ|3選|5選|NG|OK|Pro)", t):
         score += 15
-
-    # ③ 28文字以内を優遇（従来）
+    # ③ 28文字以内を優遇
     score += max(0, 15 - max(0, len(t) - 28))
     return score
 
 LANG_NAME = {
     "en": "English", "pt": "Portuguese", "id": "Indonesian",
     "ja": "Japanese","ko": "Korean", "es": "Spanish",
+}
+
+# 日本語タイトル用のラベル（音声言語→◯◯語会話）
+JP_CONV_LABEL = {
+    "en": "英会話",
+    "ja": "日本語会話",
+    "es": "スペイン語会話",
+    "pt": "ポルトガル語会話",
+    "ko": "韓国語会話",
+    "id": "インドネシア語会話",
 }
 
 # ───────────────────────────────────────────────
@@ -101,7 +107,7 @@ def resolve_topic(arg_topic: str) -> str:
     return arg_topic
 
 # ───────────────────────────────────────────────
-# ✅ HOOK 生成 (seed_phrase) – 短く強い1行（中立）
+# ✅ HOOK 生成 (seed_phrase)
 # ───────────────────────────────────────────────
 def _make_seed_phrase(topic: str, lang_code: str) -> str:
     lang = LANG_NAME.get(lang_code, "the target language")
@@ -120,9 +126,13 @@ def _make_seed_phrase(topic: str, lang_code: str) -> str:
         return ""
 
 # ───────────────────────────────────────────────
-# タイトル・説明・タグ（中立化）
+# タイトル・説明・タグ
 # ───────────────────────────────────────────────
-def make_title(topic, title_lang: str):
+def make_title(topic, title_lang: str, audio_lang_for_label: str | None = None):
+    """
+    日本語タイトルのときは音声言語に応じた「◯◯語会話」ラベルを自然に付与。
+    さらに学習語に寄せてスコアリングして最良の1本を返す。
+    """
     if title_lang == "ja":
         prompt = (
             "You are a YouTube copywriter.\n"
@@ -136,29 +146,50 @@ def make_title(topic, title_lang: str):
             f"Generate 5 concise {LANG_NAME.get(title_lang,'English')} titles (≤55 chars) for a short educational video.\n"
             f"Topic: {topic}\nEach should be clear, emotional, and benefit-driven.\nReturn 5 lines only."
         )
-    rsp = GPT.chat.completions.create(model="gpt-4o-mini",
-        messages=[{"role":"user","content":prompt}], temperature=0.7)
+
+    rsp = GPT.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role":"user","content":prompt}],
+        temperature=0.7
+    )
     cands = [sanitize_title(x) for x in rsp.choices[0].message.content.split("\n") if x.strip()]
+
     if title_lang == "ja":
-        cands = [t if any(t.startswith(k) for k in TOP_KEYWORDS) else f"{topic} {t}" for t in cands]
-        return sorted(cands,key=score_title,reverse=True)[0][:28]
+        label = JP_CONV_LABEL.get(audio_lang_for_label or "", "")
+        def add_prefix(t: str) -> str:
+            # シーン先頭語が無ければ topic を前置
+            if not any(t.startswith(k) for k in TOP_KEYWORDS):
+                t = f"{topic} {t}"
+            # ラベルが入っていなければ先頭に付与
+            if label and label not in t:
+                t = f"{label} {t}"
+            return t
+        cands = [add_prefix(t) for t in cands]
+        return sorted(cands, key=score_title, reverse=True)[0][:28]
     else:
-        return max(cands,key=len)[:55]
+        return max(cands, key=len)[:55]
 
 def make_desc(topic, title_lang: str):
     prompt_desc = (
         f"Write one catchy summary (≤90 chars) in {LANG_NAME.get(title_lang,'English')} "
         f"for a YouTube Shorts about \"{topic}\". End with a simple call-to-action."
     )
-    rsp = GPT.chat.completions.create(model="gpt-4o-mini",
-        messages=[{"role":"user","content":prompt_desc}], temperature=0.5)
+    rsp = GPT.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role":"user","content":prompt_desc}],
+        temperature=0.5
+    )
     base = rsp.choices[0].message.content.strip()
+
     prompt_tags = (
         f"List 2 or 3 short hashtags in {LANG_NAME.get(title_lang,'English')} "
         "related to conversation or learning."
     )
-    tag_rsp = GPT.chat.completions.create(model="gpt-4o-mini",
-        messages=[{"role":"user","content":prompt_tags}], temperature=0.3)
+    tag_rsp = GPT.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role":"user","content":prompt_tags}],
+        temperature=0.3
+    )
     hashtags = tag_rsp.choices[0].message.content.strip().replace("\n"," ")
     return f"{base} {hashtags}"
 
@@ -168,29 +199,27 @@ def make_tags(topic, audio_lang, subs, title_lang):
         "conversation", "speaking practice", "listening practice",
         "language learning", "subtitles",
     ]
-    # 字幕言語は事実として付与（聴衆の国/属性は示さない）
     for code in subs:
         if code in LANG_NAME:
             tags.append(f"{LANG_NAME[code]} subtitles")
     return list(dict.fromkeys(tags))[:15]
 
 # ───────────────────────────────────────────────
-# 行ごとの TTS スタイル（Hook/中盤/締め）
+# 行ごとの TTS スタイル
 # ───────────────────────────────────────────────
 def _style_for_line(idx: int, total: int, mode: str) -> str:
-    if idx == 0:  # Hook
+    if idx == 0:
         return "energetic"
-    if idx == total - 1:  # Closing
+    if idx == total - 1:
         return "calm" if mode in ("wisdom", "fact") else "serious"
     if mode in ("howto", "listicle", "qa"):
         return "serious" if idx in (2, 3) else "neutral"
     return "neutral"
 
 # ───────────────────────────────────────────────
-# 音声結合・トリム（行間に無音ギャップ）
+# 音声結合・トリム（行間に無音ギャップを持たせ、dur にも反映）
 # ───────────────────────────────────────────────
 def _concat_trim_to(mp_paths, max_sec, gap_ms=120):
-    from pydub import AudioSegment
     max_ms = int(max_sec * 1000)
     combined = AudioSegment.silent(duration=0)
     new_durs, elapsed = [], 0
@@ -206,7 +235,6 @@ def _concat_trim_to(mp_paths, max_sec, gap_ms=120):
             break
 
         if need <= remain:
-            # セリフ＋（最後以外は）無音をフルで入る
             combined += seg
             elapsed += seg_ms
             if extra:
@@ -214,14 +242,11 @@ def _concat_trim_to(mp_paths, max_sec, gap_ms=120):
                 elapsed += extra
             new_durs.append((seg_ms + extra) / 1000.0)
         else:
-            # 端数しか入らない
             if remain <= seg_ms:
-                # セリフ途中で終わる
                 combined += seg[:remain]
                 new_durs.append(remain / 1000.0)
                 elapsed += remain
             else:
-                # セリフ全部＋無音の一部だけ入る
                 used_gap = remain - seg_ms
                 combined += seg
                 if used_gap > 0:
@@ -240,10 +265,10 @@ def _concat_trim_to(mp_paths, max_sec, gap_ms=120):
 def run_one(topic, turns, audio_lang, subs, title_lang, yt_privacy, account, do_upload, chunk_size):
     reset_temp()
 
-    # トピック（音声言語に合わせて翻訳 → 自然さUP）
+    # トピック（音声言語へ翻訳してから生成すると自然）
     topic_for_dialogue = translate(topic, audio_lang) if audio_lang != "ja" else topic
 
-    # 強めのhook
+    # 強めの hook
     seed_phrase = _make_seed_phrase(topic_for_dialogue, audio_lang)
 
     # 台本（互換: List[(spk, line)])
@@ -258,10 +283,10 @@ def run_one(topic, turns, audio_lang, subs, title_lang, yt_privacy, account, do_
     for i, (spk, line) in enumerate(valid_dialogue, 1):
         mp = TEMP / f"{i:02d}.mp3"
         style = _style_for_line(i-1, len(valid_dialogue), CONTENT_MODE)
-        speak(audio_lang, spk, line, mp, style=style)  # ← style 渡す
+        speak(audio_lang, spk, line, mp, style=style)
         mp_parts.append(mp)
         for r, lang in enumerate(subs):
-            sub_rows[r].append(line if lang==audio_lang else translate(line, lang))
+            sub_rows[r].append(line if lang == audio_lang else translate(line, lang))
 
     # 結合・整音
     new_durs = _concat_trim_to(mp_parts, MAX_SHORTS_SEC, gap_ms=120)
@@ -311,7 +336,7 @@ def run_one(topic, turns, audio_lang, subs, title_lang, yt_privacy, account, do_
         return
 
     # メタ生成＆アップロード
-    title = make_title(topic, title_lang)
+    title = make_title(topic, title_lang, audio_lang_for_label=audio_lang)
     desc  = make_desc(topic, title_lang)
     tags  = make_tags(topic, audio_lang, subs, title_lang)
 
