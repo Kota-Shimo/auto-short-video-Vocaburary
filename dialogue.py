@@ -35,7 +35,6 @@ def _lang_rules(lang: str) -> str:
     出力言語を厳密に単一化し、他言語/他文字体系や翻訳注釈を禁止。
     出力内に言語名・国名・学習者呼称を出さない。
     """
-    # 日本語は特に英字・他言語が紛れやすいので厳格に禁止
     if lang == "ja":
         return (
             "Write entirely in Japanese. "
@@ -43,7 +42,6 @@ def _lang_rules(lang: str) -> str:
             "No translation glosses or bracketed meanings. "
             "Do not mention any language names, nationalities, or countries."
         )
-    # その他言語（出力側は中立だが、生成指示には言語を明示）
     return (
         f"Write entirely in {lang}. "
         "Do not code-switch or include other languages/writing systems. "
@@ -51,21 +49,23 @@ def _lang_rules(lang: str) -> str:
         "Do not mention any language names, nationalities, or countries."
     )
 
+# 学習イントロを促すヒント（各言語で自然に）
+def _learning_intro_hint(lang: str) -> str:
+    if lang == "ja":
+        return "Make the first line clearly say it's a learning intro, e.g.,『今日は〜を学ぼう』『今日の学び: 〜』. Keep it short and natural."
+    else:
+        return "Make the first line clearly invite learning, e.g., 'Let's learn … today.' or 'Today, we learn …'. Keep it short and natural."
+
 # ─────────────────────────────────────────
 # TTS 安定のための軽い整形（JAのみ特別処理）
 # ─────────────────────────────────────────
 def _sanitize_line(lang: str, text: str) -> str:
     txt = text.strip()
     if lang == "ja":
-        # ローマ字/英単語除去（数字は保持）
-        txt = re.sub(r"[A-Za-z]+", "", txt)
-        # 三点リーダなどを句点へ
+        txt = re.sub(r"[A-Za-z]+", "", txt)  # ローマ字/英単語除去（数字は保持）
         txt = txt.replace("...", "。").replace("…", "。")
-        # ラベルのコロン周り整形
         txt = re.sub(r"\s*:\s*", ": ", txt)
-        # 余分な空白圧縮
         txt = re.sub(r"\s+", " ", txt).strip()
-        # 末尾が中途半端なら軽く締める
         if txt and txt[-1] not in "。！？…!?":
             txt += "。"
     else:
@@ -94,51 +94,57 @@ def make_dialogue(
     """
     is_monologue = mode in MONOLOGUE_MODES
 
-    # 表示は中立、ただし日本語話者向けの括弧体裁だけ維持（出力に言語名は出ない）
     topic_hint = f"「{topic}」" if lang == "ja" else topic
     lang_rules = _lang_rules(lang)
     mode_guide = MODE_GUIDE.get(mode, MODE_GUIDE["dialogue"])
 
-    # 行長ヒント（言語名を挙げず、文字体系ベースで指示）
+    # 行長ヒント（文字体系ベース）
     length_hint = (
         "For alphabetic scripts: <= 12 words per line. "
         "For CJK or similar: keep lines concise (~<=20 characters)."
     )
 
-    # モード別の最小追加ルール（言語名・国名・“学習者”呼称を避ける）
+    # モード別追加ルール＋学習イントロ要求
     extra_rule = ""
+    intro_hint = _learning_intro_hint(lang)
     if mode == "dialogue":
         extra_rule = (
             "Include exactly one short learning tip within the dialogue "
             "(e.g., a softer request, a natural confirmation, or a polite nuance), "
-            "without mentioning any language names, countries, or learners."
+            "without mentioning any language names, countries, or learners. "
+            + intro_hint
         )
     elif mode == "fact":
         extra_rule = (
             "Include one short, surprising point about communication or cultural nuance, "
             "plus one concise example expression that fits the scene. "
-            "Do not mention any language names or countries."
+            "Do not mention any language names or countries. "
+            + intro_hint
         )
     elif mode == "howto":
         extra_rule = (
             "Structure as: a quick reason (Why) → 2 short steps (How) → a simple nudge (Try). "
-            "Keep it universal; avoid referring to any specific language or country."
+            "Keep it universal; avoid referring to any specific language or country. "
+            + intro_hint
         )
     elif mode == "listicle":
         extra_rule = (
             "Present three parallel points with a clear rhythm "
             "(e.g., 'First / Then / Finally' or their natural equivalents), "
-            "with no mention of language names or countries."
+            "with no mention of language names or countries. "
+            + intro_hint
         )
     elif mode == "wisdom":
         extra_rule = (
             "Keep it reflective and encouraging: one key idea, a tiny example, and a gentle takeaway. "
-            "Stay universal; do not mention language names or countries."
+            "Stay universal; do not mention language names or countries. "
+            + intro_hint
         )
     elif mode == "qa":
         extra_rule = (
             "Use an NG → OK → Pro pattern with very short, natural lines. "
-            "Keep it neutral; no language names or countries."
+            "Keep it neutral; no language names or countries. "
+            + intro_hint
         )
 
     if is_monologue:
@@ -153,7 +159,7 @@ Mode: {mode} ({mode_guide})
 {extra_rule}
 
 STRUCTURE:
-- Line1 (Hook, 0–2s): bold claim or question to pull attention
+- Line1 (Learning-intro Hook, 0–2s): clearly invite learning for today's topic
 - Lines2–4 (Beats 1–2): add pattern change (numbers, contrast, concrete example)
 - Lines5–6 (Beat 3): one visual tip/example
 - Final line (Closing, <=8s left): one clear action; subtly echo topic for loop feel
@@ -179,7 +185,7 @@ Mode: {mode} ({mode_guide})
 {extra_rule}
 
 STRUCTURE (map to alternating lines):
-- Line1 (Hook, 0–2s): bold claim or question
+- Line1 (Learning-intro Hook, 0–2s): clearly invite learning for today's topic
 - Lines2–4 (Beats 1–2): pattern change (numbers, contrast, example)
 - Lines5–6 (Beat 3): one concrete, visual tip/example
 - Final line (Closing, <=8s left): one clear action; subtly echo topic for loop feel
