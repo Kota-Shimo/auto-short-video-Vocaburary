@@ -80,11 +80,8 @@ def _sanitize_line(lang: str, text: str) -> str:
         txt = txt.replace("…", "...").strip()
     return txt
 
-def _fallback_line(lang: str) -> str:
-    return "はい。" if lang == "ja" else "Okay."
-
 # ─────────────────────────────────────────
-# 本体
+# 本体（不足分は埋めない／空行は捨てる）
 # ─────────────────────────────────────────
 def make_dialogue(
     topic: str,
@@ -95,9 +92,9 @@ def make_dialogue(
 ) -> List[Tuple[str, str]]:
     """
     Returns: List[(speaker, text)]
-    - dialogue/howto/listicle/qa → Alice/Bob 交互の会話中心（合計 2*turns 行）
-    - wisdom/fact → N（Narrator）中心のモノローグ（合計 turns 行）
-    - Hook → 3ビート → Closing（ループ感）を強制
+    - dialogue/howto/listicle/qa → Alice/Bob 交互の会話中心（最大 2*turns 行、空行は採用しない）
+    - wisdom/fact → N（Narrator）中心のモノローグ（最大 turns 行、空行は採用しない）
+    - Hook → 3ビート → Closing（ループ感）を推奨
     - 出力は中立：特定の言語名・国名・学習者呼称を出さない
     """
     is_monologue = mode in MONOLOGUE_MODES
@@ -173,7 +170,7 @@ STRUCTURE:
 - Final line (Closing, <=8s left): one clear action; subtly echo topic for loop feel
 
 Rules:
-1) Produce exactly {turns} lines (all spoken by 'N'), concise one sentence each.
+1) Produce up to {turns} lines (all spoken by 'N'), concise one sentence each.
 2) Prefix each line with 'N:'.
 3) {lang_rules}
 4) {length_hint}
@@ -199,7 +196,7 @@ STRUCTURE (map to alternating lines):
 - Final line (Closing, <=8s left): one clear action; subtly echo topic for loop feel
 
 Rules:
-1) Alternate strictly: Alice:, Bob:, Alice:, Bob: ... until exactly {turns * 2} lines.
+1) Alternate strictly: Alice:, Bob:, Alice:, Bob: ...
 2) Each line = one short sentence; no lists, no stage directions, no emojis.
 3) {lang_rules}
 4) {length_hint}
@@ -220,31 +217,28 @@ Rules:
     result: List[Tuple[str, str]] = []
 
     if is_monologue:
-        # "N:" 行のみを採用。足りなければ埋め草、超過はカット。
+        # "N:" 行のみを採用。空行は捨てる。パディングしない。
         lines = [l.strip() for l in raw_lines if l.strip().startswith("N:")]
-        lines = lines[:turns]
-        while len(lines) < turns:
-            lines.append("N:")  # 空でも後段でフォールバック
-        for ln in lines:
+        picked: List[Tuple[str, str]] = []
+        for ln in lines[:turns]:
             spk, txt = ("N", ln.split(":", 1)[1].strip()) if ":" in ln else ("N", "")
-            txt = _sanitize_line(lang, txt) or _fallback_line(lang)
-            result.append((spk, txt))
-        return result
+            txt = _sanitize_line(lang, txt)
+            if txt:
+                picked.append((spk, txt))
+        return picked
 
-    # 会話モード："Alice:" / "Bob:" のみ採用
+    # 会話モード："Alice:" / "Bob:" のみ採用。空行は捨てる。パディングしない。
     lines = [l.strip() for l in raw_lines if l.strip().startswith(("Alice:", "Bob:"))]
-    lines = lines[: turns * 2]
-    while len(lines) < turns * 2:
-        lines.append("Alice:" if len(lines) % 2 == 0 else "Bob:")
-
-    for idx, ln in enumerate(lines):
+    picked: List[Tuple[str, str]] = []
+    for ln in lines[: turns * 2]:
         if ":" in ln:
             spk, txt = ln.split(":", 1)
-            txt = txt.strip()
-        else:
-            spk = "Alice" if idx % 2 == 0 else "Bob"
-            txt = ""
-        txt = _sanitize_line(lang, txt) or _fallback_line(lang)
-        result.append((spk.strip(), txt))
+            txt = _sanitize_line(lang, txt.strip())
+            if txt:
+                picked.append((spk.strip(), txt))
 
-    return result
+    # 片側だけ残らないよう偶数本に揃える
+    if len(picked) % 2 == 1:
+        picked = picked[:-1]
+
+    return picked
