@@ -54,14 +54,12 @@ jobs:
           echo "$YT_ACC5" | base64 -d > tokens/token_acc5.pkl
           echo "$YT_ACC6" | base64 -d > tokens/token_acc6.pkl
 
-      - name: 🎲 Pick content mode (random)
+      # ▼ ここだけ変更：vocab を強制（1回だけ回したい用）
+      - name: 🎲 Pick content mode (force vocab)
         id: mode
-        shell: bash
-        run: |
-          MODES=(dialogue howto listicle wisdom fact qa)
-          MODE=${MODES[$RANDOM % ${#MODES[@]}]}
-          echo "mode=$MODE" | tee -a "$GITHUB_OUTPUT"
+        run: echo "mode=vocab" | tee -a "$GITHUB_OUTPUT"
 
+      # ▼ vocab のときは topic を AUTO に（main.py が語彙リストを自動生成）
       - name: 📝 Pick today’s topic
         id: topic
         env:
@@ -69,19 +67,27 @@ jobs:
           MODE: ${{ steps.mode.outputs.mode }}
         shell: bash
         run: |
-          topic=$(python - <<'PY'
-          from topic_picker import pick_by_content_type
-          import os
-          print(pick_by_content_type(os.environ.get("MODE","wisdom"), "ja"))
-          PY
-          )
-          echo "topic=$topic" | tee -a "$GITHUB_OUTPUT"
+          if [ "${{ steps.mode.outputs.mode }}" = "vocab" ]; then
+            echo "topic=AUTO" | tee -a "$GITHUB_OUTPUT"
+          else
+            topic=$(python - <<'PY'
+from topic_picker import pick_by_content_type
+import os
+print(pick_by_content_type(os.environ.get("MODE","wisdom"), "ja"))
+PY
+            )
+            echo "topic=$topic" | tee -a "$GITHUB_OUTPUT"
+          fi
 
       - name: 🎬 Build & Upload All Combos
         env:
           OPENAI_API_KEY:      ${{ secrets.OPENAI_API_KEY }}
           UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
           CONTENT_MODE:        ${{ steps.mode.outputs.mode }}
+          # ▼ vocab用オプション（必要に応じて変更OK）
+          VOCAB_WORDS:         "5"        # 1本に含める単語数
+          VOCAB_THEME:         "hotel"    # hotel / airport / restaurant など
+          VOCAB_SILENT_SECOND: "1"        # 2行目（単語+訳）を無音表示なら "1"
         run: |
           python main.py "${{ steps.topic.outputs.topic }}" \
             --turns 8 \
