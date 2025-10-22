@@ -83,7 +83,7 @@ jobs:
           UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
           CONTENT_MODE:        ${{ steps.mode.outputs.mode }}
         run: |
-          python main.py "${{ steps.topic.outputs.topic }}" \
+          python main.py "AUTO" \
             --turns 8 \
             --privacy public \
             --chunk 40
