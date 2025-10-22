@@ -101,6 +101,9 @@ JP_CONV_LABEL = {
 # ───────────────────────────────────────────────
 def resolve_topic(arg_topic: str) -> str:
     if arg_topic and arg_topic.strip().lower() == "auto":
+        # ★ vocabモードでは "AUTO" をそのまま通して run_one 側の語彙分岐を発火させる
+        if CONTENT_MODE == "vocab":
+            return "AUTO"
         first_audio_lang = COMBOS[0]["audio"]
         topic = pick_by_content_type(CONTENT_MODE, first_audio_lang)
         logging.info(f"[AUTO TOPIC] {topic}")
