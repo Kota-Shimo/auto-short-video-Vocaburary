@@ -58,7 +58,7 @@ jobs:
         id: mode
         shell: bash
         run: |
-          MODES=(vocab)
+          MODES=(dialogue)
           MODE=${MODES[$RANDOM % ${#MODES[@]}]}
           echo "mode=$MODE" | tee -a "$GITHUB_OUTPUT"
 
