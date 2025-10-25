@@ -5,7 +5,7 @@ from pathlib import Path
 # -----------------------------------------------------------
 # FILTER chain
 #   1) highpass 60 Hz         : 空調/机振動カット
-#   2) lowpass  15 kHz        : モスキートノイズ抑制
+#   2) lowpass  10.5 kHz      : モスキートノイズ抑制
 #   3) presence EQ 4 kHz +3dB : 明瞭度
 #   4) soft de-ess  8 kHz −2dB: 歯擦音をやや抑える (simple EQ)
 #   5) soft compressor        : ratio 2:1 で自然に
@@ -35,11 +35,13 @@ def enhance(in_mp3: Path, out_mp3: Path):
         str(out_mp3)
     ]
 
-    # 標準出力・エラーをそのまま表示し、失敗時は内容をわかりやすく出力
+    # 実行＆フォールバック処理
     proc = subprocess.run(cmd, text=True)
     if proc.returncode != 0:
-        raise RuntimeError(
-            f"ffmpeg returned {proc.returncode}. "
-            "コマンドラインに直接貼り付けてエラー内容を確認してください。\n"
-            "deesser フィルタが必要なら、FFmpeg full build を導入する方法もあります。"
-        )
+        print("⚠️ deesser や一部フィルタが使えない可能性があります。loudnorm のみにフォールバックします。")
+        subprocess.run([
+            "ffmpeg", "-y", "-i", str(in_mp3),
+            "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+            "-ar", "48000",
+            str(out_mp3)
+        ], check=True)
