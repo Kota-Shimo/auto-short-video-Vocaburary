@@ -5,14 +5,13 @@ main.py – GPTで台本（伸びる構成）→ OpenAI TTS → 「lines.json & 
           combos.yaml の各エントリを順に処理して、複数動画をアップロード。
 
 追加点:
-- CONTENT_MODE（dialogue/howto/listicle/wisdom/fact/qa/vocab）で“伸びる構成”に最適化
+- CONTENT_MODE（dialogue/howto/listicle/wisdom/fact/qa）で“伸びる構成”に最適化
 - topic="AUTO" で当日トピックを自動選択（pick_by_content_type）
 - seed hook を強化（_make_seed_phrase）
 - 行ごとの TTS スタイル（energetic/calm/serious/neutral）
 - 行間に短い無音ギャップ（聴感テンポ改善）
 - タイトル/タグを中立化＋学習語に寄せてスコアリング
-- 🔤（追加）日本語タイトル時は音声言語に応じて「◯◯語会話」を自然に付与
-- 🆕 vocabモード: 単語リスト（自動/手入力）→ [単語→訳→例文] を語数分くり返す動画
+- 🔤 日本語タイトル時は音声言語に応じて「◯◯語会話」を自然に付与
 """
 
 import argparse, logging, re, json, subprocess, os
@@ -36,7 +35,9 @@ from topic_picker   import pick_by_content_type
 
 GPT = OpenAI()
 MAX_SHORTS_SEC   = 59.0
-CONTENT_MODE     = os.environ.get("CONTENT_MODE", "dialogue")  # dialogue/howto/listicle/wisdom/fact/qa/vocab
+CONTENT_MODE     = os.environ.get("CONTENT_MODE", "dialogue")  # dialogue/howto/listicle/wisdom/fact/qa
+if CONTENT_MODE == "vocab":
+    CONTENT_MODE = "dialogue"  # 強制矯正：vocabは廃止
 
 # ───────────────────────────────────────────────
 # combos.yaml 読み込み
@@ -101,9 +102,6 @@ JP_CONV_LABEL = {
 # ───────────────────────────────────────────────
 def resolve_topic(arg_topic: str) -> str:
     if arg_topic and arg_topic.strip().lower() == "auto":
-        # ★ vocabモードでは "AUTO" をそのまま通して run_one 側の語彙分岐を発火させる
-        if CONTENT_MODE == "vocab":
-            return "AUTO"
         first_audio_lang = COMBOS[0]["audio"]
         topic = pick_by_content_type(CONTENT_MODE, first_audio_lang)
         logging.info(f"[AUTO TOPIC] {topic}")
@@ -128,57 +126,6 @@ def _make_seed_phrase(topic: str, lang_code: str) -> str:
         return rsp.choices[0].message.content.strip()
     except Exception:
         return ""
-
-# ───────────────────────────────────────────────
-# 語彙モード用の補助（最小）
-# ───────────────────────────────────────────────
-def _gen_example_sentence(word: str, lang_code: str) -> str:
-    """その単語を使った短い例文を1つだけ生成（失敗時はフォールバック）"""
-    prompt = (
-        f"Write one short, natural example sentence (<=12 words) in "
-        f"{LANG_NAME.get(lang_code,'English')} using the word: {word}. "
-        "No translation, no quotes."
-    )
-    try:
-        rsp = GPT.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role":"user","content":prompt}],
-            temperature=0.6,
-        )
-        sent = (rsp.choices[0].message.content or "").strip()
-        # 余計な引用符などを除去
-        return re.sub(r'^[\"“”\'\s]+|[\"“”\'\s]+$', '', sent)
-    except Exception:
-        return f"Let's practice the word {word} in a short sentence."
-
-def _gen_vocab_list(theme: str, lang_code: str, n: int) -> list[str]:
-    """
-    テーマから n 語の単語リストを生成。失敗時はホテル系フォールバック。
-    """
-    theme_for_prompt = translate(theme, lang_code) if lang_code != "en" else theme
-    prompt = (
-        f"List {n} essential single or hyphenated words for {theme_for_prompt} context "
-        f"in {LANG_NAME.get(lang_code,'English')}. Return ONLY one word per line, no numbering."
-    )
-    try:
-        rsp = GPT.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role":"user","content":prompt}],
-            temperature=0.5,
-        )
-        words = [w.strip() for w in (rsp.choices[0].message.content or "").splitlines() if w.strip()]
-        # 行頭の番号などを除去し、重複を排除
-        cleaned = []
-        for w in words:
-            w = re.sub(r"^\d+[\).]?\s*", "", w)
-            if w and w not in cleaned:
-                cleaned.append(w)
-        if len(cleaned) >= n:
-            return cleaned[:n]
-    except Exception:
-        pass
-    fallback = ["check-in", "reservation", "checkout", "receipt", "elevator", "lobby", "upgrade"]
-    return fallback[:n]
 
 # ───────────────────────────────────────────────
 # タイトル・説明・タグ
@@ -323,31 +270,12 @@ def run_one(topic, turns, audio_lang, subs, title_lang, yt_privacy, account, do_
     # トピック（通常モードは音声言語へ翻訳してから生成すると自然）
     topic_for_dialogue = translate(topic, audio_lang) if audio_lang != "ja" else topic
 
-    # 台本（互換: List[(spk, line)]）
-    if CONTENT_MODE == "vocab":
-        # 単語リストの用意：AUTOなら自動生成、文字列ならカンマ/改行区切りで使用
-        if topic.strip().lower() == "auto":
-            words_count = int(os.getenv("VOCAB_WORDS", "5"))
-            theme       = os.getenv("VOCAB_THEME", "hotel")
-            vocab_words = _gen_vocab_list(theme, audio_lang, words_count)
-        else:
-            raw = topic.replace("\r", "\n")
-            vocab_words = [w.strip() for w in re.split(r"[\n,]+", raw) if w.strip()]
-
-        # 1語あたり ①単語 → ②単語（字幕に訳）→ ③例文 の3行ブロックで構築（話者はN）
-        dialogue = []
-        for w in vocab_words:
-            ex = _gen_example_sentence(w, audio_lang)
-            dialogue.extend([("N", w), ("N", w), ("N", ex)])
-        seed_phrase = ""  # 未使用
-    else:
-        # 強めの hook
-        seed_phrase = _make_seed_phrase(topic_for_dialogue, audio_lang)
-        # 既存モード
-        dialogue = make_dialogue(
-            topic_for_dialogue, audio_lang, turns,
-            seed_phrase=seed_phrase, mode=CONTENT_MODE
-        )
+    # 台本（互換: List[(spk, line)]) – 常に汎用モードで生成
+    seed_phrase = _make_seed_phrase(topic_for_dialogue, audio_lang)
+    dialogue = make_dialogue(
+        topic_for_dialogue, audio_lang, turns,
+        seed_phrase=seed_phrase, mode=CONTENT_MODE
+    )
 
     # 音声＆字幕
     valid_dialogue = [(spk, line) for (spk, line) in dialogue if line.strip()]
@@ -355,11 +283,7 @@ def run_one(topic, turns, audio_lang, subs, title_lang, yt_privacy, account, do_
     for i, (spk, line) in enumerate(valid_dialogue, 1):
         mp = TEMP / f"{i:02d}.mp3"
         style = _style_for_line(i-1, len(valid_dialogue), CONTENT_MODE)
-        # 語彙モード：各3行ブロックの2行目（i=2,5,8,...)を無音にするオプション
-        if CONTENT_MODE == "vocab" and os.getenv("VOCAB_SILENT_SECOND","0") == "1" and (i % 3 == 2):
-            AudioSegment.silent(duration=900).export(mp, format="mp3")
-        else:
-            speak(audio_lang, spk, line, mp, style=style)
+        speak(audio_lang, spk, line, mp, style=style)
         mp_parts.append(mp)
         for r, lang in enumerate(subs):
             sub_rows[r].append(line if lang == audio_lang else translate(line, lang))
@@ -368,13 +292,9 @@ def run_one(topic, turns, audio_lang, subs, title_lang, yt_privacy, account, do_
     new_durs = _concat_trim_to(mp_parts, MAX_SHORTS_SEC, gap_ms=120)
     enhance(TEMP/"full_raw.mp3", TEMP/"full.mp3")
 
-    # 背景：vocab のときは最初の単語を使うと自然（AUTO時に "AUTO" を参照しないため）
+    # 背景
     bg_png = TEMP / "bg.png"
-    if CONTENT_MODE == "vocab" and valid_dialogue:
-        first_word = valid_dialogue[0][1]
-        fetch_bg(first_word, bg_png)
-    else:
-        fetch_bg(topic, bg_png)
+    fetch_bg(topic, bg_png)
 
     # 台本行数とオーディオ尺の整合
     valid_dialogue = valid_dialogue[:len(new_durs)]
