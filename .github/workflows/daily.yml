@@ -2,7 +2,7 @@ name: Auto-Podcast-Daily
 
 on:
   schedule:
-    #- cron: '0 15 * * *'   # JST00:00
+    - cron: '0 15 * * *'   # JST00:00
     #- cron: '0 18 * * *'   # JST03:00
     #- cron: '0 21 * * *'   # JST06:00
     #- cron: '0 0  * * *'   # JST09:00
