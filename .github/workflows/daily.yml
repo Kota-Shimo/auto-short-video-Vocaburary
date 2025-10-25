@@ -3,13 +3,13 @@ name: Auto-Podcast-Daily
 on:
   schedule:
     - cron: '0 15 * * *'   # JST00:00
-    #- cron: '0 18 * * *'   # JST03:00
-    #- cron: '0 21 * * *'   # JST06:00
-    #- cron: '0 0  * * *'   # JST09:00
-    #- cron: '0 3  * * *'   # JST12:00
-   # - cron: '0 6  * * *'   # JST15:00
-    #- cron: '0 9  * * *'   # JST18:00
-    #- cron: '0 12 * * *'   # JST21:00
+    # - cron: '0 18 * * *' # JST03:00
+    # - cron: '0 21 * * *' # JST06:00
+    # - cron: '0 0  * * *' # JST09:00
+    # - cron: '0 3  * * *' # JST12:00
+    # - cron: '0 6  * * *' # JST15:00
+    # - cron: '0 9  * * *' # JST18:00
+    # - cron: '0 12 * * *' # JST21:00
   workflow_dispatch:
 
 concurrency:
@@ -30,10 +30,19 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: 📦 Install requirements
+      - name: 📦 Install requirements (FFmpeg full build)
         run: |
+          set -e
           sudo apt-get update -y
-          sudo apt-get install -y ffmpeg
+          # ---- FFmpeg (full機能) を静的ビルドで導入 ----
+          curl -L -o ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+          tar -xJf ffmpeg.tar.xz
+          FFDIR=$(ls -d ffmpeg-*-amd64-static)
+          echo "$PWD/$FFDIR" >> $GITHUB_PATH   # PATH追加
+          # 確認（deesser が表示されればOK）
+          ffmpeg -version
+          ffmpeg -filters | grep -i deesser || true
+          # ---------------------------------------------
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
