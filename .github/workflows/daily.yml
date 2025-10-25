@@ -3,6 +3,13 @@ name: Auto-Podcast-Daily
 on:
   schedule:
     - cron: '0 15 * * *'   # JST00:00
+    # - cron: '0 18 * * *' # JST03:00
+    # - cron: '0 21 * * *' # JST06:00
+    # - cron: '0 0  * * *' # JST09:00
+    # - cron: '0 3  * * *' # JST12:00
+    # - cron: '0 6  * * *' # JST15:00
+    # - cron: '0 9  * * *' # JST18:00
+    # - cron: '0 12 * * *' # JST21:00
   workflow_dispatch:
 
 concurrency:
@@ -34,22 +41,17 @@ jobs:
 
           # 次ステップ用（恒久反映）
           echo "$PWD/$FFDIR" >> $GITHUB_PATH
+
           # このステップ内でも使えるよう一時的にPATHへ
           export PATH="$PWD/$FFDIR:$PATH"
           chmod +x "$FFDIR/ffmpeg" "$FFDIR/ffprobe"
 
           # 確認（deesser が表示されればOK）
           ffmpeg -version
-          ffmpeg -hide_banner -filters | grep -i deesser || true
-
-          # Python
+          ffmpeg -filters | grep -i deesser || true
+          # ---------------------------------------------
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
-
-      - name: 🔎 Verify FFmpeg filters
-        run: |
-          which ffmpeg || true
-          ffmpeg -hide_banner -filters | grep -i deesser || echo "NO_DEESSER"
 
       - name: 🔑 Restore YouTube tokens
         env:
@@ -96,7 +98,6 @@ jobs:
           OPENAI_API_KEY:      ${{ secrets.OPENAI_API_KEY }}
           UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
           CONTENT_MODE:        ${{ steps.mode.outputs.mode }}
-          AUDIO_DEESSER: "1"   # ← 必要なら "0" にして一時OFF
         run: |
           python main.py "AUTO" \
             --turns 8 \
