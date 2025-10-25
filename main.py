@@ -255,8 +255,9 @@ def _concat_trim_to(mp_paths, max_sec, gap_ms=120):
                 elapsed += seg_ms + used_gap
             break
 
-    (TEMP / "full_raw.mp3").unlink(missing_ok=True)
-    combined.export(TEMP / "full_raw.mp3", format="mp3")
+    # 🔁 中間はWAVで出力（MP3の壊れフレーム問題を回避）
+    (TEMP / "full_raw.wav").unlink(missing_ok=True)
+    combined.export(TEMP / "full_raw.wav", format="wav")
     return new_durs
 
 # ───────────────────────────────────────────────
@@ -290,7 +291,14 @@ def run_one(topic, turns, audio_lang, subs, title_lang, yt_privacy, account, do_
 
     # 結合・整音
     new_durs = _concat_trim_to(mp_parts, MAX_SHORTS_SEC, gap_ms=120)
-    enhance(TEMP/"full_raw.mp3", TEMP/"full.mp3")
+
+    # 🔒 enhance前にサイズチェック（生成失敗の早期検知）
+    raw_wav = TEMP / "full_raw.wav"
+    if (not raw_wav.exists()) or (raw_wav.stat().st_size < 10000):
+        size = raw_wav.stat().st_size if raw_wav.exists() else 0
+        raise RuntimeError(f"生成音声が不完全です: {raw_wav} size={size}")
+
+    enhance(raw_wav, TEMP/"full.mp3")
 
     # 背景
     bg_png = TEMP / "bg.png"
