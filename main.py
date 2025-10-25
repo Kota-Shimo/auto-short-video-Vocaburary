@@ -11,7 +11,7 @@ main.py – GPTで台本（伸びる構成）→ OpenAI TTS → 「lines.json & 
 - 行ごとの TTS スタイル（energetic/calm/serious/neutral）
 - 行間に短い無音ギャップ（聴感テンポ改善）
 - タイトル/タグを中立化＋学習語に寄せてスコアリング
-- 🔤 日本語タイトル時は音声言語に応じて「◯◯語会話」を自然に付与
+- 🔤（追加）日本語タイトル時は音声言語に応じて「◯◯語会話」を自然に付与
 """
 
 import argparse, logging, re, json, subprocess, os
@@ -36,8 +36,6 @@ from topic_picker   import pick_by_content_type
 GPT = OpenAI()
 MAX_SHORTS_SEC   = 59.0
 CONTENT_MODE     = os.environ.get("CONTENT_MODE", "dialogue")  # dialogue/howto/listicle/wisdom/fact/qa
-if CONTENT_MODE == "vocab":
-    CONTENT_MODE = "dialogue"  # 強制矯正：vocabは廃止
 
 # ───────────────────────────────────────────────
 # combos.yaml 読み込み
@@ -267,11 +265,13 @@ def _concat_trim_to(mp_paths, max_sec, gap_ms=120):
 def run_one(topic, turns, audio_lang, subs, title_lang, yt_privacy, account, do_upload, chunk_size):
     reset_temp()
 
-    # トピック（通常モードは音声言語へ翻訳してから生成すると自然）
+    # トピック（音声言語へ翻訳してから生成すると自然）
     topic_for_dialogue = translate(topic, audio_lang) if audio_lang != "ja" else topic
 
-    # 台本（互換: List[(spk, line)]) – 常に汎用モードで生成
+    # 強めの hook
     seed_phrase = _make_seed_phrase(topic_for_dialogue, audio_lang)
+
+    # 台本（互換: List[(spk, line)])
     dialogue = make_dialogue(
         topic_for_dialogue, audio_lang, turns,
         seed_phrase=seed_phrase, mode=CONTENT_MODE
