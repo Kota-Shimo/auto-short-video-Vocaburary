@@ -17,7 +17,7 @@ main.py – GPTで台本（伸びる構成）→ OpenAI TTS → 「lines.json & 
 import argparse, logging, re, json, subprocess, os
 from datetime import datetime
 from pathlib import Path
-from shutil import rmtree, copyfile  # ← 追加
+from shutil import rmtree
 
 import yaml
 from pydub import AudioSegment
@@ -284,27 +284,13 @@ def run_one(topic, turns, audio_lang, subs, title_lang, yt_privacy, account, do_
         mp = TEMP / f"{i:02d}.mp3"
         style = _style_for_line(i-1, len(valid_dialogue), CONTENT_MODE)
         speak(audio_lang, spk, line, mp, style=style)
-
-        # ▼ 追加：TTS直後の壊れ/極小ファイル対策（1KB未満は300ms無音に置換）
-        if (not mp.exists()) or mp.stat().st_size < 1024:
-            from pydub import AudioSegment
-            print(f"[tts] empty/too-small audio at line {i}, inserting 300ms silence")
-            AudioSegment.silent(duration=300).export(mp, format="mp3")
-
         mp_parts.append(mp)
         for r, lang in enumerate(subs):
             sub_rows[r].append(line if lang == audio_lang else translate(line, lang))
 
     # 結合・整音
     new_durs = _concat_trim_to(mp_parts, MAX_SHORTS_SEC, gap_ms=120)
-
-    # ▼ 置換：FFmpegに渡す前のサイズガード（4KB未満は加工スキップしてコピー）
-    raw = TEMP / "full_raw.mp3"
-    if (not raw.exists()) or raw.stat().st_size < 4096:
-        print("[guard] full_raw.mp3 too small or broken; copying raw as-is.")
-        copyfile(raw, TEMP / "full.mp3")
-    else:
-        enhance(raw, TEMP / "full.mp3")
+    enhance(TEMP/"full_raw.mp3", TEMP/"full.mp3")
 
     # 背景
     bg_png = TEMP / "bg.png"
