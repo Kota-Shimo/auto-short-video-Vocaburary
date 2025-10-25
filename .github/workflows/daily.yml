@@ -38,7 +38,14 @@ jobs:
           curl -L -o ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
           tar -xJf ffmpeg.tar.xz
           FFDIR=$(ls -d ffmpeg-*-amd64-static)
-          echo "$PWD/$FFDIR" >> $GITHUB_PATH   # PATH追加
+
+          # 次ステップ用（恒久反映）
+          echo "$PWD/$FFDIR" >> $GITHUB_PATH
+
+          # このステップ内でも使えるよう一時的にPATHへ
+          export PATH="$PWD/$FFDIR:$PATH"
+          chmod +x "$FFDIR/ffmpeg" "$FFDIR/ffprobe"
+
           # 確認（deesser が表示されればOK）
           ffmpeg -version
           ffmpeg -filters | grep -i deesser || true
